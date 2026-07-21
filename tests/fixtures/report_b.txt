@@ -1,0 +1,5 @@
+10.00	100	100	U	0	unclassified
+90.00	900	0	R	1	root
+90.00	900	0	D	2	  Bacteria
+20.00	200	200	S	3	    Species alpha
+70.00	700	700	S	5	    Species gamma

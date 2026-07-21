@@ -2,29 +2,32 @@
 name = "krakenclip"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.86"
+description = "High-performance toolkit for processing Kraken2 reports, logs, and sequence files"
+license = "MIT"
+repository = "https://github.com/hecrp/krakenclip"
 
 [dependencies]
 # Command-line parsing
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 
 # Parallelism
-rayon = "1.8"
+rayon = "1.12"
 
 # Parsing and serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-memchr = "2.6"
-fast-float = "0.2"
-nom = "7.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memchr = "2.8"
 
 # Utils
-memory-stats = "1.0.0"
-colored = "2.0"
-rand = "0.8.5"
+memory-stats = "1.2"
+colored = "3.1"
+rand = "0.10"
 chrono = "0.4"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
+tempfile = "3.27.0"
 
 [[bench]]
 name = "parsing_benchmark"
@@ -39,4 +42,10 @@ panic = 'abort'              # Removes panic recovery code
 strip = true                 # Removes debug information
 debug = false                # No debug information
 incremental = false          # Disables incremental compilation to optimize size
-overflow-checks = false      # Disables overflow checks for performance
+overflow-checks = true       # Keep arithmetic failures observable
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
