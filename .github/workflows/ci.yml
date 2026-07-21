@@ -21,6 +21,9 @@ jobs:
       - run: cargo test --locked
       - run: cargo bench --locked --no-run
       - run: cargo build --release --locked
+      - run: docker build --tag krakenclip:test .
+      - run: docker run --rm krakenclip:test --version
+      - run: docker run --rm --volume "$PWD/tests/fixtures:/data:ro" krakenclip:test analyze /data/report_a.txt
 
   security:
     runs-on: ubuntu-latest
