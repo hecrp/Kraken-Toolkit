@@ -311,7 +311,7 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
             let total_sequences = count_sequences_in_file(&args.sequence)?;
 
             match sequence_processor::process_sequence_files(
-                &[args.sequence.clone()],
+                std::slice::from_ref(&args.sequence),
                 &readids,
                 &args.output,
                 args.exclude,
@@ -333,18 +333,13 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
                         readids.len()
                     );
                 }
-                Err(e) => {
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )))
-                }
+                Err(e) => return Err(Box::new(std::io::Error::other(e.to_string()))),
             }
 
             // Generate statistics file if requested
             if let Some(ref stats_file) = args.stats_output {
                 match generate_statistics_file(
-                    &stats_file,
+                    stats_file,
                     &taxid_readid_map,
                     &original_taxids,
                     total_sequences,

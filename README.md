@@ -1,10 +1,10 @@
 # KrakenClip
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.86%2B-blue.svg)](https://www.rust-lang.org/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/hecrp/krakenclip.svg)](https://hub.docker.com/r/hecrp/krakenclip)
 [![Docker Image Size](https://img.shields.io/docker/image-size/hecrp/krakenclip.svg)](https://hub.docker.com/r/hecrp/krakenclip)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/hecrp/krakenclip)
+[![CI](https://github.com/hecrp/KrakenClip/actions/workflows/ci.yml/badge.svg)](https://github.com/hecrp/KrakenClip/actions/workflows/ci.yml)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/hecrp/krakenclip/graphs/commit-activity)
 
 KrakenClip is a high-performance command-line utility written in [Rust](https://www.rust-lang.org/) for processing and analyzing [Kraken2](https://ccb.jhu.edu/software/kraken2/) bioinformatics software reports and log files. This toolkit focuses on fast and efficient processing of classifier outputs, making it an ideal choice for large datasets or bioinformatics pipelines as it works as a standalone binary with no external dependencies.
@@ -19,7 +19,7 @@ The inspiration to develop KrakenClip came from creating a high-performance vers
 
 ### Prerequisites
 
-- Rust programming language (latest stable version or 1.70)
+- Rust programming language 1.86 or newer
 - Cargo (Rust's package manager)
 
 ### Installation
@@ -32,7 +32,7 @@ The inspiration to develop KrakenClip came from creating a high-performance vers
 
 2. Build the project:
    ```
-   cargo build --release
+   cargo build --release --locked
    ```
 
 3. The executable will be available in `target/release/krakenclip`
@@ -162,8 +162,8 @@ OPTIONS:
     -o, --output <o>         Output file for the abundance matrix
         --format <FORMAT>    Output format: tsv (default) or biom [default: tsv]
         --level <LEVEL>      Taxonomic level to aggregate abundances (S=species, G=genus, F=family,
-                             O=order, C=class, P=phylum, K=kingdom) [default: S]
-        --min-abundance <MIN> Minimum abundance threshold (0.0-100.0) [default: 0.0]
+                             O=order, C=class, P=phylum, D=domain; K is a D alias) [default: S]
+        --min-abundance <MIN> Minimum abundance threshold [default: 0.0]
         --normalize          Normalize abundances to percentages during processing
         --include-unclassified Include unclassified sequences in the matrix
         --proportions        Transform counts to proportions (default behavior)
@@ -174,9 +174,9 @@ OPTIONS:
 - Generates a matrix of taxonomic abundances across multiple samples
 - Supports two output formats:
   - **TSV (default)**: Standard tab-separated values format
-  - **BIOM**: Biological Observation Matrix format (v1.0.0) for direct integration with microbiome analysis tools
-- Supports all taxonomic levels (species to kingdom)
-- Optional abundance threshold filtering
+  - **BIOM**: Biological Observation Matrix format (v1.0.0), including all input samples in one row-major table
+- Supports all standard Kraken2 taxonomic levels from species (`S`) to domain (`D`); `K` is retained as a compatibility alias for `D`
+- Optional abundance threshold filtering. The threshold is a percentage for proportional output and a read count with `--absolute-counts`
 - **Uses proportions (percentages) by default** for better comparability between samples
 - Two options for handling abundance values:
   - **Proportions (default)**: Shows relative abundance as percentages

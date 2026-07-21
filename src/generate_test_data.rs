@@ -144,7 +144,6 @@ pub fn generate_test_data(params: &GeneratorParams) -> Result<(), Box<dyn std::e
         &mut writer,
         child_fragments,
         1,
-        1,
         params.max_depth,
         params.max_children,
         &mut remaining_lines,
@@ -187,7 +186,6 @@ impl WeightedDistribution {
 fn distribute_fragments<R: RngExt>(
     writer: &mut BufWriter<File>,
     fragments: u64,
-    _parent_id: u64,
     depth: usize,
     max_depth: usize,
     max_children: usize,
@@ -288,7 +286,6 @@ fn distribute_fragments<R: RngExt>(
         let (child_lines, _child_frags) = distribute_fragments(
             writer,
             fragments_this_child,
-            taxid,
             depth + 1,
             max_depth,
             max_children,

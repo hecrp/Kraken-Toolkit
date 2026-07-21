@@ -74,8 +74,8 @@ pub fn print_taxon_info(info: &TaxonInfo) {
 
 fn print_taxonomic_tree(parents: &[TaxonEntry], current: &TaxonEntry, children: &[TaxonEntry]) {
     for (i, parent) in parents.iter().enumerate() {
-        print!(
-            "{}├── {}: {} (C{}) (D{})\n",
+        println!(
+            "{}├── {}: {} (C{}) (D{})",
             "│   ".repeat(i),
             parent.taxon_id,
             parent.name,
@@ -85,8 +85,8 @@ fn print_taxonomic_tree(parents: &[TaxonEntry], current: &TaxonEntry, children: 
     }
 
     let parent_depth = parents.len();
-    print!(
-        "{}└── {}: {} (C{}) (D{})\n",
+    println!(
+        "{}└── {}: {} (C{}) (D{})",
         "│   ".repeat(parent_depth),
         current.taxon_id,
         current.name.green(),
