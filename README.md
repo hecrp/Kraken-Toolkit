@@ -7,216 +7,308 @@
 [![CI](https://github.com/hecrp/KrakenClip/actions/workflows/ci.yml/badge.svg)](https://github.com/hecrp/KrakenClip/actions/workflows/ci.yml)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/hecrp/krakenclip/graphs/commit-activity)
 
-KrakenClip is a high-performance command-line utility written in [Rust](https://www.rust-lang.org/) for processing and analyzing [Kraken2](https://ccb.jhu.edu/software/kraken2/) bioinformatics software reports and log files. This toolkit focuses on fast and efficient processing of classifier outputs, making it an ideal choice for large datasets or bioinformatics pipelines as it works as a standalone binary with no external dependencies.
+KrakenClip is a high-performance command-line toolkit written in [Rust](https://www.rust-lang.org/) for processing [Kraken2](https://ccb.jhu.edu/software/kraken2/) reports, classification logs, and sequence files. It is designed as a fast, dependency-free alternative for the most common post-processing workflows used in metagenomic pipelines.
 
-KrakenClip implements several functionalities inspired by [KrakenTools](https://github.com/jenniferlu717/KrakenTools), which was the pioneering suite of scripts for handling Kraken2 outputs. The merit for these functionalities belongs to KrakenTools, and if you use KrakenClip in your research, please consider citing KrakenTools as well:
+KrakenClip implements functionality inspired by [KrakenTools](https://github.com/jenniferlu717/KrakenTools). Credit for the original ideas and workflows belongs to KrakenTools; if you use KrakenClip in your research, please also cite:
 
-Lu J, Rincon N, Wood DE, Breitwieser FP, Pockrandt C, Langmead B, Salzberg SL, Steinegger M. Metagenome analysis using the Kraken software suite. Nature Protocols, doi: 10.1038/s41596-022-00738-y (2022)
+> Lu J, Rincon N, Wood DE, Breitwieser FP, Pockrandt C, Langmead B, Salzberg SL, Steinegger M. Metagenome analysis using the Kraken software suite. Nature Protocols, doi: 10.1038/s41596-022-00738-y (2022)
 
-The inspiration to develop KrakenClip came from creating a high-performance version of KrakenTools while improving Rust programming skills. KrakenTools was extensively used during my PhD and integrated into metagenomic data analysis pipelines, making it an essential tool in my research workflow. This experience highlighted both the utility and the potential performance limitations of the original Python-based tools, motivating the development of this Rust implementation.
+## Features
+
+- **Standalone binary** with no runtime Python or Biopython dependencies
+- **Fast report parsing** with indexed taxonomy for parent/child expansion
+- **Sequence extraction** from FASTA/FASTQ, including gzip and paired-end inputs
+- **Multi-sample abundance matrices** in TSV, BIOM, MPA, and Krona formats
+- **Report combination** across samples (`combine-kreports`)
+- **Built-in performance tooling** via Criterion benches and synthetic test-data generation
+- **Docker multi-arch image** for x86_64 and ARM64
 
 ## Getting Started
 
 ### Prerequisites
 
-- Rust programming language 1.86 or newer
-- Cargo (Rust's package manager)
+- Rust 1.86 or newer
+- Cargo
 
-### Installation
+### Install from source
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/hecrp/krakenclip.git
-   cd krakenclip
-   ```
-
-2. Build the project:
-   ```
-   cargo build --release --locked
-   ```
-
-3. The executable will be available in `target/release/krakenclip`
-    ```
-    ./target/release/krakenclip --help
-    ```
+```bash
+git clone https://github.com/hecrp/krakenclip.git
+cd krakenclip
+cargo build --release --locked
+./target/release/krakenclip --help
+```
 
 ### Docker
 
-You can also use the provided Dockerfile to build and run KrakenClip in a container:
+Build locally:
 
-1. Build the Docker image:
-   ```
-   docker build -t krakenclip .
-   ```
+```bash
+docker build -t krakenclip .
+docker run --rm krakenclip --help
+```
 
-2. Run the Docker container:
-   ```
-   docker run --rm krakenclip
-   ```
+Process local files by mounting a data directory:
 
-3. To process files, mount volumes and run the toolkit:
-   ```
-   docker run --rm -v /path/to/local/data:/data krakenclip analyze /data/report.txt
-   ```
+```bash
+docker run --rm -v /path/to/local/data:/data krakenclip analyze /data/report.txt
+```
 
-4. Alternatively, pull the pre-built multi-architecture image from Docker Hub:
-   ```
-   docker pull hecrp/krakenclip:latest
-   ```
-   
-   The image on Docker Hub is built with multi-architecture support, allowing it to run transparently on both x86 and ARM architectures, including Apple Silicon where it has been developed and tested. This means the same image will work natively on any system without manual configuration.
+Or pull the multi-architecture image from Docker Hub:
+
+```bash
+docker pull hecrp/krakenclip:latest
+```
+
+The published image runs natively on both x86_64 and ARM architectures, including Apple Silicon.
+
+## Quick examples
+
+```bash
+# Inspect a Kraken2 report and optionally emit JSON
+krakenclip analyze sample.kreport --tax-id 562 --json sample.json
+
+# Extract reads assigned to one or more taxids
+krakenclip extract reads.fastq kraken.log \
+  --output selected.fastq \
+  --taxids 562,1280
+
+# Extract a taxon plus all descendants
+krakenclip extract reads.fastq kraken.log \
+  --output bacteria.fastq \
+  --taxids 2 \
+  --include-children \
+  --report sample.kreport
+
+# Paired-end + gzip extraction
+krakenclip extract reads_R1.fastq.gz kraken.log \
+  --sequence2 reads_R2.fastq.gz \
+  --output selected_R1.fastq.gz \
+  --output2 selected_R2.fastq.gz \
+  --taxids 562
+
+# Build a multi-sample abundance matrix
+krakenclip abundance-matrix sample_a.kreport sample_b.kreport \
+  --output matrix.tsv \
+  --level S
+
+# Export BIOM (sparse by default), MPA, or Krona
+krakenclip abundance-matrix *.kreport --output matrix.biom --format biom
+krakenclip abundance-matrix *.kreport --output matrix.mpa --format mpa
+krakenclip abundance-matrix sample.kreport --output krona.txt --format krona
+
+# Combine multiple Kraken2 reports
+krakenclip combine-kreports sample_*.kreport --output combined.kreport
+```
 
 ## Usage
 
-The basic syntax for using KrakenClip is shown below:
+```text
+Usage: krakenclip <COMMAND>
 
-```
-USAGE:
-    krakenclip [SUBCOMMAND]
+Commands:
+  analyze             Analyzes a Kraken2 report
+  extract             Extracts sequences based on Kraken2 results
+  abundance-matrix    Generates taxonomic abundance matrices from multiple reports
+  combine-kreports    Combines multiple Kraken2 reports into one
+  generate-test-data  Generates test data for performance testing
+  help                Print this message or the help of the given subcommand(s)
 
-OPTIONS:
-    -h, --help       Print help information
-    -V, --version    Print version information
-
-SUBCOMMANDS:
-    analyze               Analyze Kraken2 report
-    extract               Extract sequences based on Kraken2 results
-    abundance-matrix      Generate taxonomic abundance matrices from multiple reports
-    combine-kreports      Combine multiple Kraken2 reports into one
-    generate-test-data    Generate test data for performance testing
-    help                  Print this message or the help of the given subcommand(s)
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
-### Analyze Module
+### `analyze`
 
-Used to analyze and extract information from Kraken2 reports:
+Inspect a Kraken2 report, query a taxon, and optionally export JSON.
 
-```
-USAGE:
-    krakenclip analyze [OPTIONS] <REPORT>
+```text
+Usage: krakenclip analyze [OPTIONS] <REPORT>
 
-ARGS:
-    <REPORT>    Kraken2 report file
+Arguments:
+  <REPORT>  Kraken2 report file
 
-OPTIONS:
-    -h, --help                 Print help information
-        --json <JSON>          Generate JSON output
-        --tax-id <TAXON_ID>    Search for a specific taxon by ID
-```
-
-### Extract Module
-
-Used to extract sequences based on Kraken2 results:
-
-```
-USAGE:
-    krakenclip extract [OPTIONS] --output <OUTPUT> --taxids <TAXIDS> <SEQUENCE> <LOG>
-
-ARGS:
-    <SEQUENCE>                Input FASTA/FASTQ file (plain or .gz)
-    <LOG>                     Kraken2 log file (plain or .gz)
-
-OPTIONS:
-    -h, --help                Print help information
-    -o, --output <OUTPUT>     Output file for extracted sequences (plain or .gz)
-        --sequence2 <FILE>    Mate/pair FASTA/FASTQ for paired-end extraction (alias: --s2)
-        --output2 <FILE>      Mate/pair output file (required with --sequence2; alias: --o2)
-        --report <REPORT>     Kraken2 report file (required for hierarchy (--include) options)
-        --taxids <TAXIDS>     Comma-separated list of taxids to extract
-        --include-children    Include sequences from all descendant taxa
-        --include-parents     Include sequences from all ancestor taxa
-        --exclude             Exclude sequences matching the specified taxids (inverse operation)
-        --stats-output <FILE> Generate a statistics file with detailed extraction information
+Options:
+      --json <JSON>        Generate JSON output
+      --tax-id <TAXON_ID>  Look for a specific taxon by ID
+  -h, --help               Print help
 ```
 
-#### Hierarchical Extraction
+Example:
 
-The Extract module supports hierarchical taxonomic extraction with two key options:
+```bash
+krakenclip analyze sample.kreport --tax-id 562 --json sample.json
+```
 
-- **`--include-children`**: Extracts sequences from the specified taxids AND all their descendant taxa.
-- **`--include-parents`**: Extracts sequences from the specified taxids AND all their ancestor taxa.
+The command prints parse time and an approximate memory delta after processing.
 
-Both options require providing a Kraken2 report file with the `--report` option. Hierarchy expansion uses an indexed taxonomy built during report parsing.
+### `extract`
+
+Extract or exclude reads from FASTA/FASTQ files using a Kraken2 classification log.
+
+```text
+Usage: krakenclip extract [OPTIONS] --output <OUTPUT> --taxids <TAXIDS> <SEQUENCE> <LOG>
+
+Arguments:
+  <SEQUENCE>  Input FASTA/FASTQ file (optionally .gz)
+  <LOG>       Kraken2 log file (optionally .gz)
+
+Options:
+  -o, --output <OUTPUT>              Output file for extracted sequences (optionally .gz)
+      --sequence2 <SEQUENCE2>        Mate/pair FASTA/FASTQ for paired-end extraction [alias: --s2]
+      --output2 <OUTPUT2>            Mate/pair output file (required with --sequence2) [alias: --o2]
+      --report <REPORT>              Kraken2 report file (required for hierarchy options)
+      --taxids <TAXIDS>              Comma-separated list of taxids to extract
+      --include-children             Include sequences from all descendant taxa
+      --include-parents              Include sequences from all ancestor taxa
+      --exclude                      Exclude sequences matching the specified taxids
+      --stats-output <STATS_OUTPUT>  Generate a statistics file with detailed information
+  -h, --help                         Print help
+```
+
+#### Hierarchical extraction
+
+- `--include-children` keeps the requested taxids and all descendants
+- `--include-parents` keeps the requested taxids and all ancestors
+- Both options require `--report`
+- Expansion uses a taxonomy index built while parsing the report
 
 #### Paired-end and gzip
 
-- Provide `--sequence2/--s2` and `--output2/--o2` together to extract matched pairs.
-- `.gz` inputs and outputs are detected automatically (path extension or gzip magic bytes).
+- Provide `--sequence2/--s2` together with `--output2/--o2`
+- Mate IDs may include `/1` and `/2` suffixes; matching is done on the shared read ID
+- `.gz` inputs/outputs are detected from the file extension or gzip magic bytes
 
-#### Statistics Report
+#### Statistics
 
-The `--stats-output` option generates a CSV statistics file that includes:
+`--stats-output` writes a CSV file with:
 
-- Total sequence counts (extracted vs. input), counted during the extraction pass
-- Breakdown of extracted sequences by taxid
-- Percentage of sequences per taxid relative to total extracted and total input
-- Distinction between original taxids and those added through hierarchical expansion
+- total sequences seen during the extraction pass
+- sequences extracted per taxid
+- percentages relative to extracted and total input
+- whether each taxid was requested directly or added by hierarchy expansion
 
-### Abundance Matrix Module
+Sequence totals are counted while streaming the input, so extraction does not require a second full-file scan.
 
-Used to generate taxonomic abundance matrices from Kraken2 reports:
+### `abundance-matrix`
 
-```
-USAGE:
-    krakenclip abundance-matrix [OPTIONS] --output <o> <INPUT>...
+Build taxonomic abundance tables from one or more Kraken2 reports. Reports are parsed in parallel.
 
-ARGS:
-    <INPUT>...               Input Kraken2 report files (can be multiple)
+```text
+Usage: krakenclip abundance-matrix [OPTIONS] --output <OUTPUT> <INPUT>...
 
-OPTIONS:
-    -h, --help               Print help information
-    -o, --output <o>         Output file for the abundance matrix
-        --format <FORMAT>    Output format: tsv, biom, mpa, or krona [default: tsv]
-        --biom-matrix-type <TYPE>
-                             BIOM encoding: sparse (default) or dense
-        --level <LEVEL>      Taxonomic level to aggregate abundances (S=species, G=genus, F=family,
-                             O=order, C=class, P=phylum, D=domain; K is a D alias) [default: S]
-        --min-abundance <MIN> Minimum abundance threshold [default: 0.0]
-        --normalize          Normalize abundances to percentages during processing
-        --include-unclassified Include unclassified sequences in the matrix
-        --proportions        Transform counts to proportions (default behavior)
-        --absolute-counts    Use absolute read counts without converting to proportions
-```
+Arguments:
+  <INPUT>...  Input Kraken2 report files (can be multiple)
 
-#### Features
-- Generates a matrix of taxonomic abundances across multiple samples (reports are parsed in parallel)
-- Supports four output formats:
-  - **TSV (default)**: Standard tab-separated values format
-  - **BIOM**: Biological Observation Matrix format (v1.0.0), sparse by default
-  - **MPA**: MetaPhlAn-style taxonomy abundance table
-  - **Krona**: Simple magnitude + taxonomy text input
-- Supports all standard Kraken2 taxonomic levels from species (`S`) to domain (`D`); `K` is retained as a compatibility alias for `D`
-- Optional abundance threshold filtering. The threshold is a percentage for proportional output and a read count with `--absolute-counts`
-- **Uses proportions (percentages) by default** for better comparability between samples
-- Complete handling of unclassified reads with `--include-unclassified`
-
-### Combine Reports Module
-
-```
-USAGE:
-    krakenclip combine-kreports --output <OUTPUT> <INPUT>...
+Options:
+  -o, --output <OUTPUT>
+          Output file for the abundance matrix
+      --format <FORMAT>
+          Output format (tsv, biom, mpa, or krona) [default: tsv]
+      --biom-matrix-type <BIOM_MATRIX_TYPE>
+          BIOM matrix encoding when --format biom (dense or sparse) [default: sparse]
+      --level <LEVEL>
+          Taxonomic level for aggregating abundances [default: S]
+      --min-abundance <MIN_ABUNDANCE>
+          Minimum abundance threshold (0.0-100.0) [default: 0.0]
+      --normalize
+          Normalize abundances to percentages during processing
+      --include-unclassified
+          Include unclassified sequences in the matrix
+      --proportions
+          Transform counts to proportions
+      --absolute-counts
+          Use absolute read counts without converting to proportions
+  -h, --help
+          Print help
 ```
 
-Sums clade/direct reads across multiple Kraken2 reports into a single combined report, similar in spirit to KrakenTools `combine_kreports.py`.
+#### Output formats
 
-## Performance notes
+| Format | Description |
+|--------|-------------|
+| `tsv` | Tab-separated taxon × sample matrix (default) |
+| `biom` | BIOM 1.0.0 JSON table; sparse by default, dense optional |
+| `mpa` | MetaPhlAn-style abundance table |
+| `krona` | Simple Krona text input (`magnitude` + taxon name) |
 
-KrakenClip targets the same core workflows as KrakenTools (`extract`, report summarization, multi-sample abundance tables) with a focus on:
+#### Abundance units
 
-- Numeric taxid sets and optional statistics maps in `extract`
-- Single-pass sequence counting during extraction
-- Indexed taxonomy for parent/child expansion
-- Compact JSON (no pretty-print) for report/BIOM exports
-- Representative Criterion benches in `benches/` (`parsing_benchmark`, `pipeline_benchmark`)
+- Proportions/percentages are the default
+- Use `--absolute-counts` for raw clade read counts
+- `--min-abundance` is interpreted in the same units as the output
+- Supported levels: `S`, `G`, `F`, `O`, `C`, `P`, `D` (`K` is accepted as an alias for `D`)
 
-Run local benchmarks after building release tooling:
+Examples:
 
+```bash
+krakenclip abundance-matrix *.kreport -o matrix.tsv --level G
+krakenclip abundance-matrix *.kreport -o matrix.biom --format biom --biom-matrix-type sparse
+krakenclip abundance-matrix sample.kreport -o matrix.tsv --absolute-counts --min-abundance 100
 ```
+
+### `combine-kreports`
+
+Combine multiple Kraken2 reports by summing clade and direct reads for shared taxids.
+
+```text
+Usage: krakenclip combine-kreports --output <OUTPUT> <INPUT>...
+
+Arguments:
+  <INPUT>...  Input Kraken2 report files
+
+Options:
+  -o, --output <OUTPUT>  Combined output report path
+  -h, --help             Print help
+```
+
+Example:
+
+```bash
+krakenclip combine-kreports sample_a.kreport sample_b.kreport -o combined.kreport
+```
+
+### `generate-test-data`
+
+Generate synthetic Kraken2-style reports for benchmarking and stress testing.
+
+```text
+Usage: krakenclip generate-test-data --output <OUTPUT> --lines <LINES> --type <TYPE>
+
+Options:
+  -o, --output <OUTPUT>  Output file path
+  -l, --lines <LINES>    Number of lines to generate
+  -t, --type <TYPE>      Type of data to generate (wide, deep, fragments, dense, etc.)
+  -h, --help             Print help
+```
+
+Useful `--type` values include `wide`, `deep`, `dense`, `fragments`, `extreme`, `unbalanced`, and `mixed`.
+
+Example:
+
+```bash
+krakenclip generate-test-data -o big.kreport -l 100000 -t dense
+```
+
+## Performance
+
+KrakenClip focuses on the hot paths that dominate Kraken2 post-processing:
+
+- numeric taxid filtering in log parsing
+- single-pass sequence extraction with optional statistics
+- indexed taxonomy for hierarchical expansion
+- parallel multi-sample report parsing
+- compact JSON serialization for report/BIOM exports
+
+Run the Criterion suites locally:
+
+```bash
 cargo bench --bench parsing_benchmark -- --quick
 cargo bench --bench pipeline_benchmark -- --quick
 ```
 
-Example Criterion `--quick` results on the development host used for this change set (illustrative only; re-run on your hardware):
+Example `--quick` results from one development host (illustrative only; re-measure on your hardware):
 
 | Benchmark | Time |
 |-----------|------|
@@ -227,22 +319,49 @@ Example Criterion `--quick` results on the development host used for this change
 | abundance-matrix 8×20k reports | ~240 ms |
 | BIOM sparse serialize | ~445 ms |
 
-Document measured timings for your hardware before claiming speedups versus KrakenTools. Fixture-only timings are not representative of production metagenomic workloads.
+Do not treat fixture-only timings as representative of production metagenomic workloads, and do not claim speedups versus KrakenTools without a side-by-side comparison on the same machine and inputs.
 
 ## Library usage
 
-```
+KrakenClip can also be used as a Rust library:
+
+```bash
 cargo run --example basic_usage -- tests/fixtures/report_a.txt
 ```
 
-The example parses a report, queries a taxon, and builds an in-memory abundance matrix via the public Rust API.
+The example shows how to:
+
+1. parse a Kraken2 report
+2. query a taxon
+3. inspect the taxonomy index
+4. build an in-memory abundance matrix
+
+Public modules include `krk_parser`, `logkrk_parser`, `sequence_processor`, `abundance_matrix`, `biom`, `combine`, and `taxon_query`.
 
 ## Compatibility with KrakenTools
 
-| KrakenTools script | KrakenClip coverage |
-|--------------------|---------------------|
-| `extract_kraken_reads.py` | `extract` (paired-end + gzip supported) |
-| `kreport2mpa.py` / `combine_mpa.py` | `abundance-matrix --format mpa` |
-| `kreport2krona.py` | `abundance-matrix --format krona` |
-| `combine_kreports.py` | `combine-kreports` |
-| Bracken / diversity scripts | Not implemented |
+KrakenClip is a focused, high-performance subset of KrakenTools workflows rather than a full 1:1 replacement.
+
+| KrakenTools script | KrakenClip equivalent | Notes |
+|--------------------|-----------------------|-------|
+| `extract_kraken_reads.py` | `extract` | Supports paired-end and gzip |
+| `kreport2mpa.py` / `combine_mpa.py` | `abundance-matrix --format mpa` | Multi-sample MPA-style table |
+| `kreport2krona.py` | `abundance-matrix --format krona` | Simple Krona text output |
+| `combine_kreports.py` | `combine-kreports` | Sums shared taxids across reports |
+| Bracken filters | — | Not implemented |
+| Alpha/beta diversity scripts | — | Not implemented |
+| Taxonomy DB builders (`make_ktaxonomy.py`, `make_kreport.py`) | — | Not implemented |
+
+## Testing
+
+```bash
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo bench --locked --no-run
+```
+
+Integration fixtures live in `tests/fixtures/` and cover report analysis, extraction, exclusion, hierarchy expansion, gzip/paired-end extraction, abundance thresholds, BIOM sparse/dense export, MPA output, and report combination.
+
+## License
+
+MIT
