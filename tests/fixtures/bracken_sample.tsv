@@ -1,0 +1,4 @@
+name	taxonomy_id	taxonomy_lvl	kraken_assigned_reads	added_reads	new_est_reads	fraction_total_reads
+Host sapiens	9606	S	100	0	100	0.1000000000
+Species alpha	3	S	400	0	400	0.4000000000
+Species beta	4	S	500	0	500	0.5000000000

@@ -60,6 +60,84 @@ pub fn parse_kraken_output_with_taxids(
     parse_kraken_log(kraken_output, save_taxids, Some(taxid_readid_map))
 }
 
+/// Aggregate direct counts per taxid from a Kraken classification log.
+///
+/// When `use_read_len` is true, uses field 4 lengths (`len` or `len1|len2`).
+/// Otherwise each classified line contributes 1.
+pub fn aggregate_taxid_counts(
+    kraken_output: &str,
+    use_read_len: bool,
+) -> KrakenResult<HashMap<u32, u64>> {
+    let mut counts = HashMap::new();
+    let mut reader = open_buf_reader(kraken_output)?;
+    let mut buffer = Vec::with_capacity(BUFFER_SIZE);
+    let mut tab_positions = Vec::with_capacity(5);
+
+    loop {
+        buffer.clear();
+        tab_positions.clear();
+        let bytes_read = reader.read_until(LF_CHAR, &mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        if buffer.last() == Some(&LF_CHAR) {
+            buffer.pop();
+        }
+
+        let mut pos = 0;
+        while let Some(offset) = memchr(TAB_CHAR, &buffer[pos..]) {
+            tab_positions.push(pos + offset);
+            pos += offset + 1;
+            if tab_positions.len() >= 4 {
+                break;
+            }
+        }
+        if tab_positions.len() < 2 {
+            continue;
+        }
+
+        let taxid_start = tab_positions[1] + 1;
+        let taxid_end = if tab_positions.len() > 2 {
+            tab_positions[2]
+        } else {
+            buffer.len()
+        };
+        let taxid_str = std::str::from_utf8(&buffer[taxid_start..taxid_end])?;
+        let Ok(taxid) = taxid_str.parse::<u32>() else {
+            continue;
+        };
+
+        let increment = if use_read_len && tab_positions.len() >= 3 {
+            let len_start = tab_positions[2] + 1;
+            let len_end = if tab_positions.len() > 3 {
+                tab_positions[3]
+            } else {
+                buffer.len()
+            };
+            let len_field = std::str::from_utf8(&buffer[len_start..len_end])?;
+            parse_read_length(len_field)
+        } else {
+            1
+        };
+
+        *counts.entry(taxid).or_insert(0) = counts
+            .get(&taxid)
+            .copied()
+            .unwrap_or(0_u64)
+            .saturating_add(increment);
+    }
+
+    Ok(counts)
+}
+
+fn parse_read_length(field: &str) -> u64 {
+    if let Some((left, right)) = field.split_once('|') {
+        left.parse::<u64>().unwrap_or(0) + right.parse::<u64>().unwrap_or(0)
+    } else {
+        field.parse::<u64>().unwrap_or(1).max(1)
+    }
+}
+
 fn parse_kraken_log(
     kraken_output: &str,
     save_taxids: &HashSet<u32>,

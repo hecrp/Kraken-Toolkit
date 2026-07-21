@@ -1,8 +1,15 @@
 use crate::abundance_matrix::{validate_taxonomic_level, AbundanceMatrix};
 use crate::biom::{BiomMatrixType, BiomTable};
-use crate::combine;
+use crate::bracken::{filter_bracken, parse_bracken_file, write_bracken_file};
+use crate::combine::{self, CombineOptions};
+use crate::diversity::{
+    alpha_from_bracken, beta_matrix, default_sample_name, load_sample_counts_bracken,
+    load_sample_counts_kreport, load_sample_counts_tsv, write_beta_matrix, AlphaMetric,
+};
 use crate::generate_test_data;
+use crate::kreport_builder;
 use crate::krk_parser;
+use crate::lineage::{self, LineageOptions};
 use crate::logkrk_parser;
 use crate::sequence_processor;
 use crate::taxon_query::{find_taxon_info, print_taxon_info};
@@ -19,7 +26,6 @@ use std::time::Instant;
 
 const BUFFER_SIZE: usize = 512 * 1024;
 
-/// KrakenClip - High-performance Kraken2 data processing toolkit
 #[derive(Parser)]
 #[command(version = env!("CARGO_PKG_VERSION"), about = "A high-performance toolkit for processing Kraken2 reports, logs, and sequence files")]
 struct Cli {
@@ -29,164 +35,185 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Analyzes a Kraken2 report
     Analyze(AnalyzeArgs),
-
-    /// Extracts sequences based on Kraken2 results
     Extract(ExtractArgs),
-
-    /// Generates taxonomic abundance matrices from multiple reports
     #[command(name = "abundance-matrix")]
     AbundanceMatrix(AbundanceMatrixArgs),
-
-    /// Combines multiple Kraken2 reports into one
     #[command(name = "combine-kreports")]
     CombineKreports(CombineKreportsArgs),
-
-    /// Generates test data for performance testing
+    #[command(name = "filter-bracken")]
+    FilterBracken(FilterBrackenArgs),
+    #[command(name = "alpha-diversity")]
+    AlphaDiversity(AlphaDiversityArgs),
+    #[command(name = "beta-diversity")]
+    BetaDiversity(BetaDiversityArgs),
+    #[command(name = "make-kreport")]
+    MakeKreport(MakeKreportArgs),
     #[command(name = "generate-test-data")]
     GenerateTestData(GenerateTestDataArgs),
 }
 
 #[derive(Args)]
 struct AnalyzeArgs {
-    /// Kraken2 report file
     report: String,
-
-    /// Generate JSON output
     #[arg(long)]
     json: Option<String>,
-
-    /// Look for a specific taxon by ID
     #[arg(long = "tax-id")]
     taxon_id: Option<u32>,
 }
 
 #[derive(Args)]
 struct ExtractArgs {
-    /// Input FASTA/FASTQ file (optionally .gz)
     sequence: String,
-
-    /// Kraken2 log file (optionally .gz)
     log: String,
-
-    /// Output file for extracted sequences (optionally .gz)
     #[arg(short, long)]
     output: String,
-
-    /// Optional mate/pair FASTA/FASTQ file for paired-end extraction
     #[arg(long = "sequence2", visible_alias = "s2")]
     sequence2: Option<String>,
-
-    /// Output file for mate/pair sequences (required with --sequence2)
     #[arg(long = "output2", visible_alias = "o2")]
     output2: Option<String>,
-
-    /// Kraken2 report file (required for hierarchy options)
     #[arg(long)]
     report: Option<String>,
-
-    /// Comma-separated list of taxids to extract
     #[arg(long)]
     taxids: String,
-
-    /// Include sequences from all descendant taxa
     #[arg(long = "include-children")]
     include_children: bool,
-
-    /// Include sequences from all ancestor taxa
     #[arg(long = "include-parents")]
     include_parents: bool,
-
-    /// Exclude sequences matching the specified taxids
     #[arg(long)]
     exclude: bool,
-
-    /// Generate a statistics file with detailed information
     #[arg(long = "stats-output")]
     stats_output: Option<String>,
+    /// Stop after writing this many matching records
+    #[arg(long = "max")]
+    max_reads: Option<usize>,
 }
 
 #[derive(Args)]
 struct AbundanceMatrixArgs {
-    /// Input Kraken2 report files (can be multiple)
     #[arg(required = true)]
     input: Vec<String>,
-
-    /// Output file for the abundance matrix
     #[arg(short, long)]
     output: String,
-
-    /// Output format (tsv, biom, mpa, or krona)
     #[arg(long, default_value = "tsv")]
     format: String,
-
-    /// BIOM matrix encoding when --format biom (dense or sparse)
     #[arg(long = "biom-matrix-type", default_value = "sparse")]
     biom_matrix_type: String,
-
-    /// Taxonomic level for aggregating abundances
     #[arg(long, default_value = "S")]
     level: String,
-
-    /// Minimum abundance threshold (0.0-100.0)
     #[arg(long = "min-abundance", default_value = "0.0")]
     min_abundance: f64,
-
-    /// Normalize abundances to percentages during processing
     #[arg(long, conflicts_with = "absolute_counts")]
     normalize: bool,
-
-    /// Include unclassified sequences in the matrix
     #[arg(long = "include-unclassified")]
     include_unclassified: bool,
-
-    /// Transform counts to proportions
     #[arg(long, conflicts_with = "absolute_counts")]
     proportions: bool,
-
-    /// Use absolute read counts without converting to proportions
     #[arg(long = "absolute-counts")]
     absolute_counts: bool,
+    /// Include intermediate ranks in MPA/Krona lineages
+    #[arg(long = "intermediate-ranks")]
+    intermediate_ranks: bool,
+    /// Use report percentages instead of clade reads for MPA
+    #[arg(long = "percentages")]
+    percentages: bool,
+    /// Keep spaces in MPA taxon names
+    #[arg(long = "keep-spaces")]
+    keep_spaces: bool,
+    /// Write an MPA header line
+    #[arg(long = "display-header")]
+    display_header: bool,
 }
 
 #[derive(Args)]
 struct CombineKreportsArgs {
-    /// Input Kraken2 report files
     #[arg(required = true)]
     input: Vec<String>,
-
-    /// Combined output report path
     #[arg(short, long)]
     output: String,
+    #[arg(long = "sample-names", value_delimiter = ',')]
+    sample_names: Vec<String>,
+    #[arg(long = "display-headers")]
+    display_headers: bool,
+    #[arg(long = "no-headers")]
+    no_headers: bool,
+    #[arg(long = "only-combined")]
+    only_combined: bool,
+}
+
+#[derive(Args)]
+struct FilterBrackenArgs {
+    #[arg(short, long)]
+    input: String,
+    #[arg(short, long)]
+    output: String,
+    #[arg(long = "include", value_delimiter = ',')]
+    include: Vec<u32>,
+    #[arg(long = "exclude", value_delimiter = ',')]
+    exclude: Vec<u32>,
+}
+
+#[derive(Args)]
+struct AlphaDiversityArgs {
+    #[arg(short, long)]
+    input: String,
+    /// Alpha metric: shannon, berger-parker, simpson, inverse-simpson, fisher
+    #[arg(long = "type", default_value = "shannon")]
+    metric: String,
+}
+
+#[derive(Args)]
+struct BetaDiversityArgs {
+    #[arg(short = 'i', long = "input", required = true, num_args = 1..)]
+    input: Vec<String>,
+    #[arg(short, long)]
+    output: String,
+    /// Input type: bracken, kreport, or tsv
+    #[arg(long = "type", default_value = "bracken")]
+    input_type: String,
+    /// Taxonomic level filter for kreport inputs
+    #[arg(long)]
+    level: Option<String>,
+    /// Category,count columns for generic TSV inputs
+    #[arg(long = "cols", default_value = "0,1")]
+    cols: String,
+}
+
+#[derive(Args)]
+struct MakeKreportArgs {
+    #[arg(short = 'k', long = "log")]
+    log: String,
+    #[arg(short = 't', long = "taxonomy")]
+    taxonomy: String,
+    #[arg(short, long)]
+    output: String,
+    #[arg(long = "use-read-len")]
+    use_read_len: bool,
 }
 
 #[derive(Args)]
 struct GenerateTestDataArgs {
-    /// Output file path
     #[arg(short, long)]
     output: String,
-
-    /// Number of lines to generate
     #[arg(short, long)]
     lines: usize,
-
-    /// Type of data to generate (wide, deep, fragments, dense, etc.)
     #[arg(short, long)]
     r#type: String,
 }
 
 pub fn run_cli() {
     let cli = Cli::parse();
-
     let result = match cli.command {
         Commands::Analyze(args) => run_analyze(args),
         Commands::Extract(args) => run_extract(args),
         Commands::AbundanceMatrix(args) => run_abundance_matrix(args),
         Commands::CombineKreports(args) => run_combine_kreports(args),
+        Commands::FilterBracken(args) => run_filter_bracken(args),
+        Commands::AlphaDiversity(args) => run_alpha_diversity(args),
+        Commands::BetaDiversity(args) => run_beta_diversity(args),
+        Commands::MakeKreport(args) => run_make_kreport(args),
         Commands::GenerateTestData(args) => run_generate_test_data(args),
     };
-
     if let Err(e) = result {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -196,31 +223,29 @@ pub fn run_cli() {
 fn run_analyze(args: AnalyzeArgs) -> Result<(), Box<dyn Error>> {
     let before_memory = memory_stats().map(|s| s.physical_mem).unwrap_or(0);
     let start_time = Instant::now();
-
     let (report, parse_time) = krk_parser::parse_kraken2_report(&args.report)
         .map_err(|e| format!("Error parsing Kraken2 report file '{}': {}", args.report, e))?;
-
     if let Some(taxon_id) = args.taxon_id {
         match find_taxon_info(&report.root, taxon_id as u64) {
             Some(taxon_info) => print_taxon_info(&taxon_info),
             None => println!("Taxon with ID {} not found", taxon_id),
         }
     }
-
     if let Some(json_output) = args.json {
         krk_parser::write_json_report(&report, &json_output)
             .map_err(|e| format!("Error writing JSON report '{}': {}", json_output, e))?;
         println!("JSON report written to {}", json_output);
     }
-
     let after_memory = memory_stats().map(|s| s.physical_mem).unwrap_or(0);
-    let memory_used = after_memory.saturating_sub(before_memory);
-    let total_time = start_time.elapsed().as_secs_f64();
-
-    println!("Total time: {:.6} seconds", total_time);
+    println!(
+        "Total time: {:.6} seconds",
+        start_time.elapsed().as_secs_f64()
+    );
     println!("File parsing time: {:.6} seconds", parse_time);
-    println!("Memory usage: {} bytes", memory_used);
-
+    println!(
+        "Memory usage: {} bytes",
+        after_memory.saturating_sub(before_memory)
+    );
     Ok(())
 }
 
@@ -242,7 +267,6 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
                 .map_err(|_| format!("Invalid taxid '{s}': expected an unsigned integer"))
         })
         .collect::<Result<_, _>>()?;
-
     if taxids.is_empty() {
         return Err("Error: at least one taxid is required".into());
     }
@@ -253,30 +277,23 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
     if (args.include_children || args.include_parents) && args.report.is_some() {
         let report_file = args.report.clone().unwrap();
         println!("Reading taxonomy from report file: {}", report_file);
-
         let (report, _) = krk_parser::parse_kraken2_report(&report_file)
             .map_err(|e| format!("Error parsing Kraken2 report file '{}': {}", report_file, e))?;
-
         let mut expanded_count = 0;
         let mut new_taxids = HashSet::with_capacity(taxids.len() * 10);
         new_taxids.extend(taxids.iter().copied());
-
         for &taxid in &taxids {
             if args.include_children {
-                println!("Including children for taxid: {}", taxid);
                 let children = report.index.all_descendants(taxid);
                 expanded_count += children.len();
                 new_taxids.extend(children);
             }
-
             if args.include_parents {
-                println!("Including parents for taxid: {}", taxid);
                 let parents = report.index.all_ancestors(taxid);
                 expanded_count += parents.len();
                 new_taxids.extend(parents);
             }
         }
-
         expanded_taxids = new_taxids;
         println!(
             "Expanded to {} taxids (added {} through hierarchy)",
@@ -289,8 +306,7 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
 
     let want_stats = args.stats_output.is_some();
     let mut taxid_readid_map: HashMap<u32, HashSet<String>> = HashMap::new();
-
-    let readids = if want_stats {
+    let mut readids = if want_stats {
         logkrk_parser::parse_kraken_output_with_taxids(
             &args.log,
             &expanded_taxids,
@@ -301,6 +317,16 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
         logkrk_parser::parse_kraken_output(&args.log, &expanded_taxids)
             .map_err(|e| format!("Error parsing Kraken2 log file: {}", e))?
     };
+
+    if let Some(max_reads) = args.max_reads {
+        if readids.len() > max_reads {
+            let mut limited = HashSet::with_capacity(max_reads);
+            for id in readids.into_iter().take(max_reads) {
+                limited.insert(id);
+            }
+            readids = limited;
+        }
+    }
 
     let stats = if let (Some(sequence2), Some(output2)) = (&args.sequence2, &args.output2) {
         sequence_processor::process_paired_sequence_files(
@@ -331,15 +357,6 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
         stats.written_sequences,
         expanded_taxids.len()
     );
-    println!(
-        "Total {} sequences: {}",
-        if args.exclude {
-            "excluded"
-        } else {
-            "extracted"
-        },
-        stats.written_sequences
-    );
 
     if let Some(ref stats_file) = args.stats_output {
         generate_statistics_file(
@@ -351,7 +368,6 @@ fn run_extract(args: ExtractArgs) -> Result<(), Box<dyn Error>> {
         )?;
         println!("Statistics written to {}", stats_file);
     }
-
     Ok(())
 }
 
@@ -364,14 +380,12 @@ fn generate_statistics_file(
 ) -> Result<(), Box<dyn Error>> {
     let file = File::create(stats_file)?;
     let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
-
     let mut total_extracted = 0;
     let mut total_original_taxids = 0;
     let mut total_expanded_taxids = 0;
     let mut orig_sequences = 0;
     let mut expanded_sequences = 0;
     let mut stats: Vec<(u32, usize, bool)> = Vec::with_capacity(taxid_readid_map.len());
-
     for (taxid, readids) in taxid_readid_map {
         let count = readids.len();
         total_extracted += count;
@@ -385,15 +399,12 @@ fn generate_statistics_file(
         }
         stats.push((*taxid, count, is_original));
     }
-
     stats.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-
     let percent_extracted = if total_sequences > 0 {
         (total_extracted as f64 / total_sequences as f64) * 100.0
     } else {
         0.0
     };
-
     writeln!(writer, "# KrakenClip Extraction Statistics")?;
     writeln!(
         writer,
@@ -401,13 +412,7 @@ fn generate_statistics_file(
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
     )?;
     writeln!(writer, "# Input file: {}", args.sequence)?;
-    if let Some(ref sequence2) = args.sequence2 {
-        writeln!(writer, "# Paired input file: {}", sequence2)?;
-    }
     writeln!(writer, "# Kraken output: {}", args.log)?;
-    if let Some(ref report) = args.report {
-        writeln!(writer, "# Kraken report: {}", report)?;
-    }
     writeln!(writer, "# Include children: {}", args.include_children)?;
     writeln!(writer, "# Include parents: {}", args.include_parents)?;
     writeln!(writer, "# Exclude mode: {}", args.exclude)?;
@@ -432,7 +437,6 @@ fn generate_statistics_file(
         writer,
         "taxid,sequences,percent_of_extracted,percent_of_total,is_original"
     )?;
-
     for (taxid, count, is_original) in stats {
         let percent_of_extracted = if total_extracted > 0 {
             (count as f64 / total_extracted as f64) * 100.0
@@ -450,7 +454,6 @@ fn generate_statistics_file(
             taxid, count, percent_of_extracted, percent_of_total, is_original
         )?;
     }
-
     writer.flush()?;
     Ok(())
 }
@@ -466,7 +469,6 @@ fn run_abundance_matrix(args: AbundanceMatrixArgs) -> Result<(), Box<dyn Error>>
     if args.min_abundance < 0.0 {
         return Err("Minimum abundance cannot be negative".into());
     }
-
     let supported = ["tsv", "biom", "mpa", "krona"];
     if !supported.contains(&args.format.as_str()) {
         return Err(format!(
@@ -476,19 +478,12 @@ fn run_abundance_matrix(args: AbundanceMatrixArgs) -> Result<(), Box<dyn Error>>
         .into());
     }
 
-    let biom_matrix_type = match args.biom_matrix_type.as_str() {
-        "dense" => BiomMatrixType::Dense,
-        "sparse" => BiomMatrixType::Sparse,
-        other => {
-            return Err(
-                format!("Unsupported BIOM matrix type '{other}'. Use 'dense' or 'sparse'.").into(),
-            )
-        }
+    let lineage_options = LineageOptions {
+        intermediate_ranks: args.intermediate_ranks,
+        use_percentages: args.percentages,
+        replace_spaces: !args.keep_spaces,
+        display_header: args.display_header,
     };
-
-    let mut matrix = AbundanceMatrix::new(&args.level);
-    matrix.set_force_include_unclassified(args.include_unclassified);
-    let proportional = args.normalize || args.proportions || !args.absolute_counts;
 
     let mut used_sample_names = HashSet::new();
     let jobs: Vec<(String, String)> = args
@@ -519,64 +514,158 @@ fn run_abundance_matrix(args: AbundanceMatrixArgs) -> Result<(), Box<dyn Error>>
             Ok((sample_name.clone(), report))
         })
         .collect();
-
-    for (sample_name, report) in parsed? {
-        matrix.add_sample(&report, &sample_name, args.min_abundance, proportional);
-    }
+    let reports = parsed?;
 
     match args.format.as_str() {
-        "tsv" => {
-            matrix
-                .write_matrix(&args.output)
-                .map_err(|error| format!("Error generating abundance matrix: {error}"))?;
-            println!(
-                "Abundance matrix successfully generated in: {}",
-                args.output
-            );
-        }
-        "biom" => {
-            BiomTable::from_abundance_matrix(&matrix, biom_matrix_type)
-                .write_json(&args.output)
-                .map_err(|error| format!("Error generating BIOM output: {error}"))?;
-            println!(
-                "BIOM format output successfully generated in: {}",
-                args.output
-            );
-        }
         "mpa" => {
-            matrix
-                .write_mpa(&args.output)
-                .map_err(|error| format!("Error generating MPA output: {error}"))?;
+            lineage::write_combined_mpa(&reports, &args.output, lineage_options)?;
             println!(
                 "MPA format output successfully generated in: {}",
                 args.output
             );
         }
         "krona" => {
-            matrix
-                .write_krona(&args.output)
-                .map_err(|error| format!("Error generating Krona output: {error}"))?;
+            if reports.len() != 1 {
+                return Err(
+                    "Krona export currently supports a single input report (KrakenTools kreport2krona semantics)"
+                        .into(),
+                );
+            }
+            lineage::write_krona_file(&reports[0].1, &args.output, lineage_options)?;
             println!(
                 "Krona format output successfully generated in: {}",
                 args.output
             );
         }
-        _ => unreachable!("format was validated above"),
+        "tsv" | "biom" => {
+            let biom_matrix_type = match args.biom_matrix_type.as_str() {
+                "dense" => BiomMatrixType::Dense,
+                "sparse" => BiomMatrixType::Sparse,
+                other => {
+                    return Err(format!(
+                        "Unsupported BIOM matrix type '{other}'. Use 'dense' or 'sparse'."
+                    )
+                    .into())
+                }
+            };
+            let mut matrix = AbundanceMatrix::new(&args.level);
+            matrix.set_force_include_unclassified(args.include_unclassified);
+            let proportional = args.normalize || args.proportions || !args.absolute_counts;
+            for (sample_name, report) in &reports {
+                matrix.add_sample(report, sample_name, args.min_abundance, proportional);
+            }
+            if args.format == "tsv" {
+                matrix.write_matrix(&args.output)?;
+                println!(
+                    "Abundance matrix successfully generated in: {}",
+                    args.output
+                );
+            } else {
+                BiomTable::from_abundance_matrix(&matrix, biom_matrix_type)
+                    .write_json(&args.output)?;
+                println!(
+                    "BIOM format output successfully generated in: {}",
+                    args.output
+                );
+            }
+        }
+        _ => unreachable!(),
     }
-
     Ok(())
 }
 
 fn run_combine_kreports(args: CombineKreportsArgs) -> Result<(), Box<dyn Error>> {
-    combine::combine_kreports(&args.input, &args.output)?;
+    let options = CombineOptions {
+        sample_names: args.sample_names,
+        display_headers: args.display_headers,
+        no_headers: args.no_headers,
+        only_combined: args.only_combined,
+    };
+    combine::combine_kreports(&args.input, &args.output, &options)?;
     println!("Combined report written to {}", args.output);
     Ok(())
 }
 
-fn run_generate_test_data(args: GenerateTestDataArgs) -> Result<(), Box<dyn Error>> {
-    match generate_test_data::generate_data(&args.output, args.lines, &args.r#type) {
-        Ok(_) => println!("Test data generated successfully"),
-        Err(e) => return Err(format!("Error generating test data: {}", e).into()),
+fn run_filter_bracken(args: FilterBrackenArgs) -> Result<(), Box<dyn Error>> {
+    if !args.include.is_empty() && !args.exclude.is_empty() {
+        return Err("--include and --exclude are mutually exclusive".into());
     }
+    let records = parse_bracken_file(&args.input)?;
+    let include = if args.include.is_empty() {
+        None
+    } else {
+        Some(args.include.into_iter().collect::<HashSet<_>>())
+    };
+    let exclude = if args.exclude.is_empty() {
+        None
+    } else {
+        Some(args.exclude.into_iter().collect::<HashSet<_>>())
+    };
+    let filtered = filter_bracken(&records, include.as_ref(), exclude.as_ref());
+    write_bracken_file(&args.output, &filtered)?;
+    println!(
+        "Wrote {} Bracken records to {}",
+        filtered.len(),
+        args.output
+    );
+    Ok(())
+}
+
+fn run_alpha_diversity(args: AlphaDiversityArgs) -> Result<(), Box<dyn Error>> {
+    let metric = AlphaMetric::parse(&args.metric)
+        .ok_or_else(|| format!("unsupported alpha metric '{}'", args.metric))?;
+    let records = parse_bracken_file(&args.input)?;
+    let value = alpha_from_bracken(&records, metric);
+    println!("{value:.6}");
+    Ok(())
+}
+
+fn run_beta_diversity(args: BetaDiversityArgs) -> Result<(), Box<dyn Error>> {
+    let samples: Result<Vec<_>, Box<dyn Error + Send + Sync>> = args
+        .input
+        .par_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = default_sample_name(path, index);
+            match args.input_type.as_str() {
+                "bracken" => load_sample_counts_bracken(path, &name)
+                    .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() }),
+                "kreport" => load_sample_counts_kreport(path, &name, args.level.as_deref())
+                    .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() }),
+                "tsv" => {
+                    let mut parts = args.cols.split(',');
+                    let category = parts
+                        .next()
+                        .ok_or("cols must be category,count")?
+                        .parse::<usize>()
+                        .map_err(|_| "invalid category column")?;
+                    let count = parts
+                        .next()
+                        .ok_or("cols must be category,count")?
+                        .parse::<usize>()
+                        .map_err(|_| "invalid count column")?;
+                    load_sample_counts_tsv(path, &name, category, count)
+                        .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })
+                }
+                other => Err(format!("unsupported beta input type '{other}'").into()),
+            }
+        })
+        .collect();
+    let samples = samples.map_err(|e| e.to_string())?;
+    let matrix = beta_matrix(&samples);
+    write_beta_matrix(&samples, &matrix, &args.output)?;
+    println!("Beta diversity matrix written to {}", args.output);
+    Ok(())
+}
+
+fn run_make_kreport(args: MakeKreportArgs) -> Result<(), Box<dyn Error>> {
+    kreport_builder::make_kreport(&args.log, &args.taxonomy, &args.output, args.use_read_len)?;
+    println!("Kraken report written to {}", args.output);
+    Ok(())
+}
+
+fn run_generate_test_data(args: GenerateTestDataArgs) -> Result<(), Box<dyn Error>> {
+    generate_test_data::generate_data(&args.output, args.lines, &args.r#type)?;
+    println!("Test data generated successfully");
     Ok(())
 }

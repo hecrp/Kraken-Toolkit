@@ -25,7 +25,7 @@ pub struct TaxonEntry {
 }
 
 impl TaxonEntry {
-    fn new(
+    pub fn new(
         percentage: f32,
         clade_reads: u64,
         direct_reads: u64,
@@ -497,6 +497,63 @@ pub fn parse_kraken2_report(file_path: &str) -> Result<(KrakenReport, f64), std:
         },
         duration,
     ))
+}
+
+/// Flat taxon row from a Kraken2 report without building the hierarchy tree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlatTaxon {
+    pub percentage: f32,
+    pub clade_reads: u64,
+    pub direct_reads: u64,
+    pub rank: String,
+    pub taxid: u32,
+    pub name: String,
+    pub depth: usize,
+}
+
+/// Stream flat taxon entries from a kreport, optionally filtering by rank code.
+pub fn iter_flat_taxons<F>(
+    file_path: &str,
+    rank_filter: Option<&str>,
+    mut visit: F,
+) -> std::io::Result<()>
+where
+    F: FnMut(FlatTaxon),
+{
+    let file = File::open(file_path)?;
+    let mut buffer = OptimizedBuffer::new(file);
+    let mut string_cache = StringCache::new();
+    let mut line_buffer = Vec::with_capacity(1024);
+    let mut line_number = 1;
+    let rank_filter = rank_filter.map(|rank| if rank == "K" { "D" } else { rank });
+
+    while buffer.read_line(&mut line_buffer)? {
+        if let Some(entry) = parse_line(&line_buffer, &mut string_cache, Some(line_number)) {
+            if rank_filter.is_none_or(|rank| entry.rank == rank || entry.rank.starts_with(rank)) {
+                visit(FlatTaxon {
+                    percentage: entry.percentage,
+                    clade_reads: entry.clade_reads,
+                    direct_reads: entry.direct_reads,
+                    rank: entry.rank,
+                    taxid: entry.taxid,
+                    name: entry.name,
+                    depth: entry.depth,
+                });
+            }
+        }
+        line_number += 1;
+    }
+    Ok(())
+}
+
+/// Collect flat taxa matching an optional rank filter without building a tree.
+pub fn collect_flat_taxons(
+    file_path: &str,
+    rank_filter: Option<&str>,
+) -> std::io::Result<Vec<FlatTaxon>> {
+    let mut rows = Vec::new();
+    iter_flat_taxons(file_path, rank_filter, |taxon| rows.push(taxon))?;
+    Ok(rows)
 }
 
 pub fn write_json_report(report: &KrakenReport, output_path: &str) -> std::io::Result<()> {

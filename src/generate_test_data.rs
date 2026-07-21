@@ -29,6 +29,12 @@ pub fn generate_data(
     num_lines: usize,
     data_type: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    match data_type {
+        "bracken" => return generate_bracken_data(output_file, num_lines),
+        "log" => return generate_log_data(output_file, num_lines),
+        _ => {}
+    }
+
     let mut params = GeneratorParams {
         output_file: output_file.to_string(),
         num_lines,
@@ -298,6 +304,57 @@ fn distribute_fragments<R: RngExt>(
     }
 
     Ok((total_lines, total_fragments + direct_fragments))
+}
+
+fn generate_bracken_data(
+    output_file: &str,
+    num_lines: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(output_file)?;
+    let mut writer = BufWriter::new(file);
+    writeln!(
+        writer,
+        "name\ttaxonomy_id\ttaxonomy_lvl\tkraken_assigned_reads\tadded_reads\tnew_est_reads\tfraction_total_reads"
+    )?;
+    let mut rng = rand::rng();
+    let mut total = 0_u64;
+    let mut rows = Vec::with_capacity(num_lines);
+    for i in 0..num_lines {
+        let reads = rng.random_range(1..1_000_u64);
+        total += reads;
+        rows.push((i as u32 + 10, reads));
+    }
+    for (taxid, reads) in rows {
+        let fraction = reads as f64 / total as f64;
+        writeln!(
+            writer,
+            "taxon_{taxid}\t{taxid}\tS\t{reads}\t0\t{reads}\t{fraction:.10}"
+        )?;
+    }
+    writer.flush()?;
+    println!("Generated {num_lines} Bracken rows");
+    Ok(())
+}
+
+fn generate_log_data(
+    output_file: &str,
+    num_lines: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(output_file)?;
+    let mut writer = BufWriter::new(file);
+    let mut rng = rand::rng();
+    for i in 0..num_lines {
+        let taxid = if i % 17 == 0 {
+            0
+        } else {
+            rng.random_range(2..500)
+        };
+        let status = if taxid == 0 { "U" } else { "C" };
+        writeln!(writer, "{status}\tread{i}\t{taxid}\t100\t{taxid}:100")?;
+    }
+    writer.flush()?;
+    println!("Generated {num_lines} Kraken log lines");
+    Ok(())
 }
 
 /// Run the generator with the specified parameters

@@ -1,10 +1,16 @@
 pub mod abundance_matrix;
 pub mod biom;
+pub mod bracken;
 pub mod cli;
 pub mod combine;
+pub mod diversity;
 pub mod generate_test_data;
 pub mod io_util;
+pub mod kreport_builder;
 pub mod krk_parser;
+pub mod ktaxonomy;
+pub mod lineage;
 pub mod logkrk_parser;
 pub mod sequence_processor;
+pub mod tabular;
 pub mod taxon_query;

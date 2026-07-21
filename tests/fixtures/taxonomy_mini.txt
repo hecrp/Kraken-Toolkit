@@ -1,0 +1,5 @@
+1	|	1	|	R	|	0	|	root
+2	|	1	|	D	|	1	|	Bacteria
+3	|	2	|	S	|	2	|	Species alpha
+4	|	2	|	S	|	2	|	Species beta
+0	|	0	|	U	|	0	|	unclassified

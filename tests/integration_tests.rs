@@ -30,6 +30,10 @@ fn help_lists_commands() {
     assert!(stdout.contains("extract"));
     assert!(stdout.contains("abundance-matrix"));
     assert!(stdout.contains("combine-kreports"));
+    assert!(stdout.contains("filter-bracken"));
+    assert!(stdout.contains("alpha-diversity"));
+    assert!(stdout.contains("beta-diversity"));
+    assert!(stdout.contains("make-kreport"));
 }
 
 #[test]
@@ -325,10 +329,25 @@ fn combine_kreports_and_mpa_formats() {
         fixture("report_b.txt").to_str().unwrap(),
         "--output",
         combined.to_str().unwrap(),
+        "--display-headers",
     ]);
     assert!(output.status.success(), "{:?}", output.stderr);
     let contents = fs::read_to_string(combined).unwrap();
     assert!(contents.contains("Species alpha"));
+    assert!(contents.contains("tot_all"));
+    assert!(contents.contains("report_a_all"));
+
+    let only = directory.path().join("only.txt");
+    let output = run(&[
+        "combine-kreports",
+        fixture("report_a.txt").to_str().unwrap(),
+        fixture("report_b.txt").to_str().unwrap(),
+        "--output",
+        only.to_str().unwrap(),
+        "--only-combined",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(fs::read_to_string(only).unwrap().contains("\tR\t1\t"));
 
     let mpa = directory.path().join("matrix.mpa");
     let output = run(&[
@@ -340,7 +359,100 @@ fn combine_kreports_and_mpa_formats() {
         "mpa",
     ]);
     assert!(output.status.success(), "{:?}", output.stderr);
-    assert!(fs::read_to_string(mpa)
-        .unwrap()
-        .contains("s__Species_alpha"));
+    let mpa_text = fs::read_to_string(mpa).unwrap();
+    assert!(mpa_text.contains("d__Bacteria|s__Species_alpha"));
+
+    let krona = directory.path().join("out.krona");
+    let output = run(&[
+        "abundance-matrix",
+        fixture("report_a.txt").to_str().unwrap(),
+        "--output",
+        krona.to_str().unwrap(),
+        "--format",
+        "krona",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let krona_text = fs::read_to_string(krona).unwrap();
+    assert!(krona_text.contains("400\troot\tBacteria\tSpecies alpha"));
+}
+
+#[test]
+fn filter_bracken_and_alpha_diversity() {
+    let directory = tempdir().unwrap();
+    let filtered = directory.path().join("filtered.tsv");
+    let output = run(&[
+        "filter-bracken",
+        "--input",
+        fixture("bracken_sample.tsv").to_str().unwrap(),
+        "--output",
+        filtered.to_str().unwrap(),
+        "--exclude",
+        "9606",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let text = fs::read_to_string(filtered).unwrap();
+    assert!(!text.contains("9606"));
+    assert!(text.contains("0.4444444444") || text.contains("0.5555555556"));
+
+    let alpha = run(&[
+        "alpha-diversity",
+        "--input",
+        fixture("bracken_sample.tsv").to_str().unwrap(),
+        "--type",
+        "shannon",
+    ]);
+    assert!(alpha.status.success(), "{:?}", alpha.stderr);
+    let stdout = String::from_utf8(alpha.stdout).unwrap();
+    let value: f64 = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse().ok())
+        .unwrap_or_else(|| panic!("alpha stdout was not numeric: {stdout:?}"));
+    assert!(value > 0.0);
+}
+
+#[test]
+fn beta_diversity_bracken_matrix() {
+    let directory = tempdir().unwrap();
+    let sample_b = directory.path().join("sample_b.tsv");
+    fs::write(
+        &sample_b,
+        "name\ttaxonomy_id\ttaxonomy_lvl\tkraken_assigned_reads\tadded_reads\tnew_est_reads\tfraction_total_reads\nSpecies alpha\t3\tS\t500\t0\t500\t0.5\nSpecies beta\t4\tS\t500\t0\t500\t0.5\n",
+    )
+    .unwrap();
+    let output_file = directory.path().join("beta.tsv");
+    let output = run(&[
+        "beta-diversity",
+        "--input",
+        fixture("bracken_sample.tsv").to_str().unwrap(),
+        sample_b.to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+        "--type",
+        "bracken",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let matrix = fs::read_to_string(output_file).unwrap();
+    assert!(matrix.contains("bracken_sample"));
+    assert!(matrix.lines().count() >= 3);
+}
+
+#[test]
+fn make_kreport_from_log_and_taxonomy() {
+    let directory = tempdir().unwrap();
+    let output_file = directory.path().join("made.kreport");
+    let output = run(&[
+        "make-kreport",
+        "--log",
+        fixture("kraken.log").to_str().unwrap(),
+        "--taxonomy",
+        fixture("taxonomy_mini.txt").to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report = fs::read_to_string(output_file).unwrap();
+    assert!(report.contains("unclassified"));
+    assert!(report.contains("Species alpha"));
+    assert!(report.contains("\t3\t"));
 }
