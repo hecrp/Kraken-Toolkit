@@ -1,4 +1,3 @@
-use fast_float;
 use memchr::memchr_iter;
 use std::fs::File;
 use std::io::Read;
@@ -204,11 +203,9 @@ pub fn parse_line(
         }
     };
 
-    // Fast parsing of numeric values with specialized parsers
-    // Using fast_float for improved float parsing performance
     let percentage_bytes = &line[field_starts[0]..field_ends[0]];
     let percentage = match std::str::from_utf8(percentage_bytes) {
-        Ok(s) => fast_float::parse::<f32, _>(s).unwrap_or_else(|_| {
+        Ok(s) => s.parse::<f32>().unwrap_or_else(|_| {
             if let Some(line_num) = line_number {
                 eprintln!(
                     "Warning: Failed to parse percentage value '{}' at line {}",
