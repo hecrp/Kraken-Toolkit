@@ -13,7 +13,7 @@ pub fn find_taxon_info(root: &TaxonEntry, target_tax_id: u64) -> Option<TaxonInf
         target_tax_id: u64,
         parents: &mut Vec<TaxonEntry>,
     ) -> Option<TaxonInfo> {
-        if entry.taxon_id == target_tax_id {
+        if entry.taxon_id() == target_tax_id {
             let mut all_children = Vec::new();
             collect_children(&entry.children, &mut all_children);
 
@@ -48,22 +48,22 @@ pub fn find_taxon_info(root: &TaxonEntry, target_tax_id: u64) -> Option<TaxonInf
 
 pub fn print_taxon_info(info: &TaxonInfo) {
     println!("{}", "Taxon Information:".bold());
-    println!("ID: {}", info.taxon.taxon_id.to_string().cyan());
+    println!("ID: {}", info.taxon.taxon_id().to_string().cyan());
     println!("Name: {}", info.taxon.name.yellow());
-    println!("Level: {}", info.taxon.level);
+    println!("Level: {}", info.taxon.level());
     println!(
         "Percentage: {}%",
         info.taxon.percentage.to_string().magenta()
     );
     println!(
         "Clade Fragments: {}",
-        info.taxon.clade_fragments.to_string().blue()
+        info.taxon.clade_fragments().to_string().blue()
     );
     println!(
         "Direct Fragments: {}",
-        info.taxon.direct_fragments.to_string().blue()
+        info.taxon.direct_fragments().to_string().blue()
     );
-    println!("Rank Code: {}", info.taxon.rank_code.red());
+    println!("Rank Code: {}", info.taxon.rank_code().red());
 
     println!(
         "\n{}",
@@ -77,10 +77,10 @@ fn print_taxonomic_tree(parents: &[TaxonEntry], current: &TaxonEntry, children: 
         println!(
             "{}├── {}: {} (C{}) (D{})",
             "│   ".repeat(i),
-            parent.taxon_id,
+            parent.taxon_id(),
             parent.name,
-            parent.clade_fragments,
-            parent.direct_fragments
+            parent.clade_fragments(),
+            parent.direct_fragments()
         );
     }
 
@@ -88,10 +88,10 @@ fn print_taxonomic_tree(parents: &[TaxonEntry], current: &TaxonEntry, children: 
     println!(
         "{}└── {}: {} (C{}) (D{})",
         "│   ".repeat(parent_depth),
-        current.taxon_id,
+        current.taxon_id(),
         current.name.green(),
-        current.clade_fragments,
-        current.direct_fragments
+        current.clade_fragments(),
+        current.direct_fragments()
     );
 
     print_children_tree(children, &"│   ".repeat(parent_depth + 1));
@@ -108,10 +108,10 @@ fn print_children_tree(children: &[TaxonEntry], prefix: &str) {
         println!(
             "{}{}: {} (C{}) (D{})",
             current_prefix,
-            child.taxon_id,
+            child.taxon_id(),
             child.name,
-            child.clade_fragments,
-            child.direct_fragments
+            child.clade_fragments(),
+            child.direct_fragments()
         );
 
         let new_prefix = if is_last {

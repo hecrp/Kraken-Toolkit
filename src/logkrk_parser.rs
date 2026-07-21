@@ -1,17 +1,14 @@
 use memchr::memchr;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 
-/// Optimized buffer size for efficient file reading
-const BUFFER_SIZE: usize = 512 * 1024; // 512KB
+use crate::io_util::open_buf_reader;
 
-/// Constant characters for fast byte-level comparisons
+const BUFFER_SIZE: usize = 512 * 1024;
 const TAB_CHAR: u8 = b'\t';
 const LF_CHAR: u8 = b'\n';
 
-/// Specific error type for Kraken file processing
 #[derive(Debug)]
 pub enum KrakenParseError {
     IoError(std::io::Error),
@@ -44,106 +41,63 @@ impl From<std::str::Utf8Error> for KrakenParseError {
     }
 }
 
-/// Specialized result type for Kraken parsing functions
 type KrakenResult<T> = Result<T, KrakenParseError>;
 
-/// Parses a Kraken output file and returns a set of read IDs
-/// that match the specified taxids.
-///
-/// This version is maintained for backward compatibility.
-///
-/// # Arguments
-/// * `kraken_output` - Path to the Kraken output file
-/// * `save_taxids` - Set of taxonomic IDs to look for
-///
-/// # Returns
-/// * `Result<HashSet<String>, Box<dyn Error>>` - Set of matching read IDs
-#[allow(dead_code)]
+/// Lightweight parse that only collects matching read IDs.
 pub fn parse_kraken_output(
     kraken_output: &str,
-    save_taxids: &HashSet<String>,
+    save_taxids: &HashSet<u32>,
 ) -> Result<HashSet<String>, Box<dyn Error>> {
-    let mut taxid_readid_map = HashMap::new();
-    let result =
-        parse_kraken_output_with_taxids(kraken_output, save_taxids, &mut taxid_readid_map)?;
-    Ok(result)
+    Ok(parse_kraken_log(kraken_output, save_taxids, None)?)
 }
 
-/// Parses a Kraken output file and returns a set of read IDs
-/// that match the specified taxids. Additionally, it records which
-/// taxid corresponds to each read ID in the taxid_readid_map.
-///
-/// This version is optimized for performance using zero-copy operations when possible.
-///
-/// # Arguments
-/// * `kraken_output` - Path to the Kraken output file
-/// * `save_taxids` - Set of taxonomic IDs to look for
-/// * `taxid_readid_map` - Map to record the relationship between taxids and read IDs
-///
-/// # Returns
-/// * `Result<HashSet<String>, Box<dyn Error>>` - Set of matching read IDs
-///
-/// # Implementation Details
-/// This function uses several optimization techniques:
-/// - Preallocates memory based on expected result sizes
-/// - Uses memchr for efficient byte searching
-/// - Employs zero-copy string extraction where possible
-/// - Reuses buffers to minimize memory allocations
+/// Parse a Kraken log and optionally populate taxid -> read ID statistics.
 pub fn parse_kraken_output_with_taxids(
     kraken_output: &str,
-    save_taxids: &HashSet<String>,
-    taxid_readid_map: &mut HashMap<String, HashSet<String>>,
+    save_taxids: &HashSet<u32>,
+    taxid_readid_map: &mut HashMap<u32, HashSet<String>>,
 ) -> KrakenResult<HashSet<String>> {
-    // Estimate expected result size to avoid reallocations
-    let estimated_results = save_taxids.len() * 1000;
+    parse_kraken_log(kraken_output, save_taxids, Some(taxid_readid_map))
+}
+
+fn parse_kraken_log(
+    kraken_output: &str,
+    save_taxids: &HashSet<u32>,
+    mut taxid_readid_map: Option<&mut HashMap<u32, HashSet<String>>>,
+) -> KrakenResult<HashSet<String>> {
+    let estimated_results = save_taxids.len().saturating_mul(1000).max(1024);
     let mut save_readids = HashSet::with_capacity(estimated_results);
-
-    // Open the file and create an optimized buffered reader
-    let file = File::open(kraken_output)?;
-    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
-
-    // Reusable buffer to minimize memory allocations
+    let mut reader = open_buf_reader(kraken_output)?;
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
-
-    // Pre-reserve space for tab positions
     let mut tab_positions = Vec::with_capacity(4);
 
     loop {
-        // Clear buffer before next read
         buffer.clear();
         tab_positions.clear();
 
-        // Read until newline character
         let bytes_read = reader.read_until(LF_CHAR, &mut buffer)?;
         if bytes_read == 0 {
-            // End of file reached
             break;
         }
 
-        // Remove the newline character for cleaner processing
         if buffer.last() == Some(&LF_CHAR) {
             buffer.pop();
         }
 
-        // Find tab positions using optimized memchr
         let mut pos = 0;
         while let Some(offset) = memchr(TAB_CHAR, &buffer[pos..]) {
             let absolute_pos = pos + offset;
             tab_positions.push(absolute_pos);
             pos = absolute_pos + 1;
-
-            // Exit early once we have enough tabs
             if tab_positions.len() >= 3 {
                 break;
             }
         }
 
-        // We need at least 2 tabs to get readid and taxid
         if tab_positions.len() < 2 {
             continue;
         }
 
-        // Extract taxid (field 3)
         let taxid_start = tab_positions[1] + 1;
         let taxid_end = if tab_positions.len() > 2 {
             tab_positions[2]
@@ -151,32 +105,30 @@ pub fn parse_kraken_output_with_taxids(
             buffer.len()
         };
 
-        // Convert byte slice to UTF-8 without allocating a new String
-        // This is a zero-copy operation that improves performance
-        let taxid = std::str::from_utf8(&buffer[taxid_start..taxid_end])?;
+        let taxid_str = std::str::from_utf8(&buffer[taxid_start..taxid_end])?;
+        let Ok(taxid) = taxid_str.parse::<u32>() else {
+            continue;
+        };
 
-        // Check if this taxid is one we're interested in
-        if save_taxids.contains(taxid) {
-            // Extract readid (field 2)
-            let readid_start = tab_positions[0] + 1;
-            let readid_end = tab_positions[1];
+        if !save_taxids.contains(&taxid) {
+            continue;
+        }
 
-            // We need to allocate a String because we'll store it in the HashSet
-            let readid = std::str::from_utf8(&buffer[readid_start..readid_end])?.to_string();
+        let readid_start = tab_positions[0] + 1;
+        let readid_end = tab_positions[1];
+        let readid = std::str::from_utf8(&buffer[readid_start..readid_end])?.to_string();
 
-            // Store the readid in our result set
-            save_readids.insert(readid.clone());
-
-            // Record which taxid this readid belongs to
-            taxid_readid_map
-                .entry(taxid.to_string())
+        if let Some(map) = taxid_readid_map.as_mut() {
+            map.entry(taxid)
                 .or_insert_with(|| {
                     let mut set = HashSet::new();
-                    set.reserve(1000); // Pre-allocate space for efficiency
+                    set.reserve(256);
                     set
                 })
-                .insert(readid);
+                .insert(readid.clone());
         }
+
+        save_readids.insert(readid);
     }
 
     Ok(save_readids)

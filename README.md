@@ -82,6 +82,7 @@ SUBCOMMANDS:
     analyze               Analyze Kraken2 report
     extract               Extract sequences based on Kraken2 results
     abundance-matrix      Generate taxonomic abundance matrices from multiple reports
+    combine-kreports      Combine multiple Kraken2 reports into one
     generate-test-data    Generate test data for performance testing
     help                  Print this message or the help of the given subcommand(s)
 ```
@@ -112,12 +113,14 @@ USAGE:
     krakenclip extract [OPTIONS] --output <OUTPUT> --taxids <TAXIDS> <SEQUENCE> <LOG>
 
 ARGS:
-    <SEQUENCE>                Input FASTA/FASTQ file
-    <LOG>                     Kraken2 log file
+    <SEQUENCE>                Input FASTA/FASTQ file (plain or .gz)
+    <LOG>                     Kraken2 log file (plain or .gz)
 
 OPTIONS:
     -h, --help                Print help information
-    -o, --output <OUTPUT>     Output file for extracted sequences
+    -o, --output <OUTPUT>     Output file for extracted sequences (plain or .gz)
+        --sequence2 <FILE>    Mate/pair FASTA/FASTQ for paired-end extraction (alias: --s2)
+        --output2 <FILE>      Mate/pair output file (required with --sequence2; alias: --o2)
         --report <REPORT>     Kraken2 report file (required for hierarchy (--include) options)
         --taxids <TAXIDS>     Comma-separated list of taxids to extract
         --include-children    Include sequences from all descendant taxa
@@ -128,23 +131,26 @@ OPTIONS:
 
 #### Hierarchical Extraction
 
-The Extract module now supports hierarchical taxonomic extraction with two key options:
+The Extract module supports hierarchical taxonomic extraction with two key options:
 
 - **`--include-children`**: Extracts sequences from the specified taxids AND all their descendant taxa.
-
 - **`--include-parents`**: Extracts sequences from the specified taxids AND all their ancestor taxa.
 
-Both options require providing a Kraken2 report file with the `--report` option, as the taxonomic hierarchy information is extracted from there.
+Both options require providing a Kraken2 report file with the `--report` option. Hierarchy expansion uses an indexed taxonomy built during report parsing.
+
+#### Paired-end and gzip
+
+- Provide `--sequence2/--s2` and `--output2/--o2` together to extract matched pairs.
+- `.gz` inputs and outputs are detected automatically (path extension or gzip magic bytes).
 
 #### Statistics Report
 
-The new `--stats-output` option generates a comprehensive markdown-formatted statistics file that includes:
+The `--stats-output` option generates a CSV statistics file that includes:
 
-- Total sequence counts (extracted vs. input)
+- Total sequence counts (extracted vs. input), counted during the extraction pass
 - Breakdown of extracted sequences by taxid
 - Percentage of sequences per taxid relative to total extracted and total input
-- Distinction between original taxids and those added through hierarchical expansion (expanded)
-- Summary statistics for original vs. expanded taxa
+- Distinction between original taxids and those added through hierarchical expansion
 
 ### Abundance Matrix Module
 
@@ -160,7 +166,9 @@ ARGS:
 OPTIONS:
     -h, --help               Print help information
     -o, --output <o>         Output file for the abundance matrix
-        --format <FORMAT>    Output format: tsv (default) or biom [default: tsv]
+        --format <FORMAT>    Output format: tsv, biom, mpa, or krona [default: tsv]
+        --biom-matrix-type <TYPE>
+                             BIOM encoding: sparse (default) or dense
         --level <LEVEL>      Taxonomic level to aggregate abundances (S=species, G=genus, F=family,
                              O=order, C=class, P=phylum, D=domain; K is a D alias) [default: S]
         --min-abundance <MIN> Minimum abundance threshold [default: 0.0]
@@ -171,14 +179,70 @@ OPTIONS:
 ```
 
 #### Features
-- Generates a matrix of taxonomic abundances across multiple samples
-- Supports two output formats:
+- Generates a matrix of taxonomic abundances across multiple samples (reports are parsed in parallel)
+- Supports four output formats:
   - **TSV (default)**: Standard tab-separated values format
-  - **BIOM**: Biological Observation Matrix format (v1.0.0), including all input samples in one row-major table
+  - **BIOM**: Biological Observation Matrix format (v1.0.0), sparse by default
+  - **MPA**: MetaPhlAn-style taxonomy abundance table
+  - **Krona**: Simple magnitude + taxonomy text input
 - Supports all standard Kraken2 taxonomic levels from species (`S`) to domain (`D`); `K` is retained as a compatibility alias for `D`
 - Optional abundance threshold filtering. The threshold is a percentage for proportional output and a read count with `--absolute-counts`
 - **Uses proportions (percentages) by default** for better comparability between samples
-- Two options for handling abundance values:
-  - **Proportions (default)**: Shows relative abundance as percentages
-  - **Absolute counts**: Shows raw read counts (use `--absolute-counts` to enable)
 - Complete handling of unclassified reads with `--include-unclassified`
+
+### Combine Reports Module
+
+```
+USAGE:
+    krakenclip combine-kreports --output <OUTPUT> <INPUT>...
+```
+
+Sums clade/direct reads across multiple Kraken2 reports into a single combined report, similar in spirit to KrakenTools `combine_kreports.py`.
+
+## Performance notes
+
+KrakenClip targets the same core workflows as KrakenTools (`extract`, report summarization, multi-sample abundance tables) with a focus on:
+
+- Numeric taxid sets and optional statistics maps in `extract`
+- Single-pass sequence counting during extraction
+- Indexed taxonomy for parent/child expansion
+- Compact JSON (no pretty-print) for report/BIOM exports
+- Representative Criterion benches in `benches/` (`parsing_benchmark`, `pipeline_benchmark`)
+
+Run local benchmarks after building release tooling:
+
+```
+cargo bench --bench parsing_benchmark -- --quick
+cargo bench --bench pipeline_benchmark -- --quick
+```
+
+Example Criterion `--quick` results on the development host used for this change set (illustrative only; re-run on your hardware):
+
+| Benchmark | Time |
+|-----------|------|
+| parse kraken2 report fixture | ~12 µs |
+| parse kraken2 report ~100k lines | ~11.5 ms |
+| parse kraken log 50k reads | ~2.1 ms |
+| extract matching FASTQ 50k reads | ~10.4 ms |
+| abundance-matrix 8×20k reports | ~240 ms |
+| BIOM sparse serialize | ~445 ms |
+
+Document measured timings for your hardware before claiming speedups versus KrakenTools. Fixture-only timings are not representative of production metagenomic workloads.
+
+## Library usage
+
+```
+cargo run --example basic_usage -- tests/fixtures/report_a.txt
+```
+
+The example parses a report, queries a taxon, and builds an in-memory abundance matrix via the public Rust API.
+
+## Compatibility with KrakenTools
+
+| KrakenTools script | KrakenClip coverage |
+|--------------------|---------------------|
+| `extract_kraken_reads.py` | `extract` (paired-end + gzip supported) |
+| `kreport2mpa.py` / `combine_mpa.py` | `abundance-matrix --format mpa` |
+| `kreport2krona.py` | `abundance-matrix --format krona` |
+| `combine_kreports.py` | `combine-kreports` |
+| Bracken / diversity scripts | Not implemented |

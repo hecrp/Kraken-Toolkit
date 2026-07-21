@@ -1,56 +1,98 @@
 use std::collections::HashSet;
 use std::error::Error;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, Write};
 
 use memchr::memchr;
-use rayon::prelude::*;
 
-// Optimized buffer size constant for efficient I/O operations
-const BUFFER_SIZE: usize = 1024 * 1024; // 1MB buffer
+use crate::io_util::{open_buf_reader, open_buf_writer};
 
-/// Process sequence files and extract those matching the specified read IDs
+/// Counters collected while streaming sequence files.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessStats {
+    pub total_sequences: usize,
+    pub written_sequences: usize,
+}
+
+/// Process one or more sequence files and extract matching read IDs.
 ///
-/// # Arguments
-/// * `input_files` - List of input FASTA/FASTQ files to process
-/// * `save_readids` - Set of read IDs to extract or exclude
-/// * `output_file` - Path to the output file where matching sequences will be written
-/// * `exclude` - If true, excludes the IDs in save_readids; if false, includes them
-///
-/// # Returns
-/// * `Result<(), Box<dyn Error + Send + Sync>>` - Result of the operation
-///
-/// # Implementation Details
-/// Multiple inputs are parsed in parallel and written in input order. A single input is
-/// streamed directly to disk to avoid synchronization and unnecessary buffering.
+/// Multiple inputs are streamed sequentially into a single output to avoid
+/// materializing each file in memory. Gzip inputs/outputs are supported when
+/// paths end with `.gz` or the input starts with gzip magic bytes.
 pub fn process_sequence_files(
     input_files: &[String],
     save_readids: &HashSet<String>,
     output_file: &str,
     exclude: bool,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let output = File::create(output_file)?;
-    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, output);
+) -> Result<ProcessStats, Box<dyn Error + Send + Sync>> {
+    let mut writer = open_buf_writer(output_file)?;
+    let mut stats = ProcessStats::default();
 
-    if input_files.len() == 1 {
-        process_sequence_file(&input_files[0], save_readids, exclude, &mut writer)?;
-    } else {
-        let chunks: Result<Vec<Vec<u8>>, io::Error> = input_files
-            .par_iter()
-            .map(|input_file| {
-                let mut output = Vec::new();
-                process_sequence_file(input_file, save_readids, exclude, &mut output)?;
-                Ok(output)
-            })
-            .collect();
-
-        for chunk in chunks? {
-            writer.write_all(&chunk)?;
-        }
+    for input_file in input_files {
+        let file_stats = process_sequence_file(input_file, save_readids, exclude, &mut writer)?;
+        stats.total_sequences += file_stats.total_sequences;
+        stats.written_sequences += file_stats.written_sequences;
     }
 
     writer.flush()?;
-    Ok(())
+    Ok(stats)
+}
+
+/// Extract paired-end reads, writing mates to separate outputs.
+pub fn process_paired_sequence_files(
+    input_r1: &str,
+    input_r2: &str,
+    save_readids: &HashSet<String>,
+    output_r1: &str,
+    output_r2: &str,
+    exclude: bool,
+) -> Result<ProcessStats, Box<dyn Error + Send + Sync>> {
+    let mut writer_r1 = open_buf_writer(output_r1)?;
+    let mut writer_r2 = open_buf_writer(output_r2)?;
+    let mut reader_r1 = open_buf_reader(input_r1)?;
+    let mut reader_r2 = open_buf_reader(input_r2)?;
+
+    let mut pending_r1: Option<Vec<u8>> = None;
+    let mut pending_r2: Option<Vec<u8>> = None;
+    let mut stats = ProcessStats::default();
+
+    loop {
+        let Some(record_r1) = read_next_record(&mut reader_r1, &mut pending_r1, input_r1)? else {
+            break;
+        };
+        let Some(record_r2) = read_next_record(&mut reader_r2, &mut pending_r2, input_r2)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("paired file '{input_r2}' ended before '{input_r1}'"),
+            )
+            .into());
+        };
+
+        stats.total_sequences += 1;
+        let id = parse_id(&record_r1.header);
+        let should_write = save_readids.contains(id) != exclude;
+        if should_write {
+            writer_r1.write_all(&record_r1.bytes)?;
+            writer_r2.write_all(&record_r2.bytes)?;
+            stats.written_sequences += 1;
+        }
+    }
+
+    if read_next_record(&mut reader_r2, &mut pending_r2, input_r2)?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("paired file '{input_r2}' has more records than '{input_r1}'"),
+        )
+        .into());
+    }
+
+    writer_r1.flush()?;
+    writer_r2.flush()?;
+    Ok(stats)
+}
+
+struct SequenceRecord {
+    header: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 fn process_sequence_file<W: Write>(
@@ -58,95 +100,118 @@ fn process_sequence_file<W: Write>(
     save_readids: &HashSet<String>,
     exclude: bool,
     writer: &mut W,
-) -> io::Result<()> {
-    let file = File::open(input_file)?;
-    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+) -> io::Result<ProcessStats> {
+    let mut reader = open_buf_reader(input_file)?;
     let mut pending_header: Option<Vec<u8>> = None;
+    let mut stats = ProcessStats::default();
 
-    loop {
-        let header = if let Some(header) = pending_header.take() {
-            header
-        } else {
+    while let Some(record) = read_next_record(&mut reader, &mut pending_header, input_file)? {
+        stats.total_sequences += 1;
+        let id = parse_id(&record.header);
+        let should_write = save_readids.contains(id) != exclude;
+        if should_write {
+            writer.write_all(&record.bytes)?;
+            stats.written_sequences += 1;
+        }
+    }
+
+    Ok(stats)
+}
+
+fn read_next_record(
+    reader: &mut dyn BufRead,
+    pending_header: &mut Option<Vec<u8>>,
+    input_file: &str,
+) -> io::Result<Option<SequenceRecord>> {
+    let header = if let Some(header) = pending_header.take() {
+        header
+    } else {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                return Ok(None);
+            }
+            if !line.iter().all(u8::is_ascii_whitespace) {
+                break;
+            }
+        }
+        line
+    };
+
+    let marker = header
+        .first()
+        .copied()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty sequence header"))?;
+    if marker != b'>' && marker != b'@' {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected FASTA/FASTQ header in '{input_file}'"),
+        ));
+    }
+
+    let id = parse_id(&header).to_string();
+    let mut record = header.clone();
+
+    if marker == b'@' {
+        for line_number in 2..=4 {
+            let mut line = Vec::new();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("truncated FASTQ record '{id}' at line {line_number}"),
+                ));
+            }
+            record.extend_from_slice(&line);
+        }
+    } else {
+        loop {
             let mut line = Vec::new();
             if reader.read_until(b'\n', &mut line)? == 0 {
                 break;
             }
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
+            if line.first() == Some(&b'>') {
+                *pending_header = Some(line);
+                break;
             }
-            line
-        };
-
-        let marker = header
-            .first()
-            .copied()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty sequence header"))?;
-        if marker != b'>' && marker != b'@' {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("expected FASTA/FASTQ header in '{input_file}'"),
-            ));
-        }
-
-        let id = parse_id(&header).to_string();
-        let should_write = save_readids.contains(&id) != exclude;
-        let mut record = header;
-
-        if marker == b'@' {
-            for line_number in 2..=4 {
-                let mut line = Vec::new();
-                if reader.read_until(b'\n', &mut line)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!("truncated FASTQ record '{id}' at line {line_number}"),
-                    ));
-                }
-                record.extend_from_slice(&line);
-            }
-        } else {
-            loop {
-                let mut line = Vec::new();
-                if reader.read_until(b'\n', &mut line)? == 0 {
-                    break;
-                }
-                if line.first() == Some(&b'>') {
-                    pending_header = Some(line);
-                    break;
-                }
-                record.extend_from_slice(&line);
-            }
-        }
-
-        if should_write {
-            writer.write_all(&record)?;
+            record.extend_from_slice(&line);
         }
     }
 
-    Ok(())
+    Ok(Some(SequenceRecord {
+        header,
+        bytes: record,
+    }))
 }
 
-/// Extract the sequence ID from a FASTA/FASTQ header line
-///
-/// # Arguments
-/// * `line` - Header line that starts with '>' or '@'
-///
-/// # Returns
-/// * `&str` - Extracted sequence ID
-///
-/// # Performance Note
-/// This function uses the highly optimized memchr library for byte-level
-/// searching, avoiding unnecessary UTF-8 validation until the final step.
 fn parse_id(line: &[u8]) -> &str {
     if line.len() <= 1 {
         return "";
     }
 
-    // Find the first space or tab after the initial character
-    // Using memchr for optimized byte searching instead of iterating character by character
-    let delimiter_pos = memchr(b' ', &line[1..])
-        .or_else(|| memchr(b'\t', &line[1..]))
-        .map(|pos| pos + 1) // Adjust for the offset from &line[1..]
-        .unwrap_or(line.len() - 1);
+    let end = line.len()
+        - line
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\n' || **b == b'\r')
+            .count();
+    let payload = &line[1..end];
 
-    std::str::from_utf8(&line[1..delimiter_pos]).unwrap_or("")
+    let delimiter_pos = memchr(b' ', payload)
+        .or_else(|| memchr(b'\t', payload))
+        .or_else(|| memchr(b'/', payload))
+        .unwrap_or(payload.len());
+
+    std::str::from_utf8(&payload[..delimiter_pos]).unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_id_strips_pair_suffix() {
+        assert_eq!(parse_id(b"@read1/1\n"), "read1");
+        assert_eq!(parse_id(b">read2 description\n"), "read2");
+    }
 }

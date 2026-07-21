@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::OnceLock;
 
 use crate::krk_parser::{KrakenReport, TaxonEntry};
 
@@ -43,9 +44,8 @@ impl From<std::io::Error> for AbundanceMatrixError {
 
 pub type AbundanceResult<T> = Result<T, AbundanceMatrixError>;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TaxonKey {
-    taxid: u32,
+#[derive(Clone, Debug)]
+struct TaxonMeta {
     name: String,
     rank: String,
 }
@@ -60,11 +60,14 @@ pub struct MatrixRow {
 
 #[derive(Default)]
 pub struct AbundanceMatrix {
-    taxon_abundances: HashMap<TaxonKey, HashMap<String, f64>>,
+    taxon_abundances: HashMap<u32, HashMap<String, f64>>,
+    taxon_meta: HashMap<u32, TaxonMeta>,
     samples: HashSet<String>,
     level: String,
     sample_totals: HashMap<String, f64>,
     force_include_unclassified: bool,
+    cached_sample_names: OnceLock<Vec<String>>,
+    cached_rows: OnceLock<Vec<MatrixRow>>,
 }
 
 impl AbundanceMatrix {
@@ -77,6 +80,12 @@ impl AbundanceMatrix {
 
     pub fn set_force_include_unclassified(&mut self, include: bool) {
         self.force_include_unclassified = include;
+        self.invalidate_cache();
+    }
+
+    fn invalidate_cache(&mut self) {
+        self.cached_sample_names = OnceLock::new();
+        self.cached_rows = OnceLock::new();
     }
 
     /// Add a sample. When `proportional` is true, values and the threshold are
@@ -88,6 +97,7 @@ impl AbundanceMatrix {
         min_abundance: f64,
         proportional: bool,
     ) {
+        self.invalidate_cache();
         self.samples.insert(sample_name.to_string());
         let total_reads = report.root.clade_reads as f64
             + report
@@ -103,11 +113,9 @@ impl AbundanceMatrix {
                     abundance_value(unclassified.clade_reads, total_reads, proportional);
                 if abundance >= min_abundance {
                     self.insert(
-                        TaxonKey {
-                            taxid: unclassified.taxid,
-                            name: UNCLASSIFIED_NAME.to_string(),
-                            rank: unclassified.rank.clone(),
-                        },
+                        unclassified.taxid,
+                        UNCLASSIFIED_NAME,
+                        &unclassified.rank,
                         sample_name,
                         abundance,
                     );
@@ -135,15 +143,7 @@ impl AbundanceMatrix {
         if node.rank == self.level {
             let abundance = abundance_value(node.clade_reads, total_reads, proportional);
             if abundance >= min_abundance {
-                self.insert(
-                    TaxonKey {
-                        taxid: node.taxid,
-                        name: node.name.clone(),
-                        rank: node.rank.clone(),
-                    },
-                    sample_name,
-                    abundance,
-                );
+                self.insert(node.taxid, &node.name, &node.rank, sample_name, abundance);
             }
         }
 
@@ -152,14 +152,19 @@ impl AbundanceMatrix {
         }
     }
 
-    fn insert(&mut self, key: TaxonKey, sample_name: &str, abundance: f64) {
+    fn insert(&mut self, taxid: u32, name: &str, rank: &str, sample_name: &str, abundance: f64) {
+        self.taxon_meta.entry(taxid).or_insert_with(|| TaxonMeta {
+            name: name.to_string(),
+            rank: rank.to_string(),
+        });
         self.taxon_abundances
-            .entry(key)
+            .entry(taxid)
             .or_default()
             .insert(sample_name.to_string(), abundance);
     }
 
     pub fn transform_to_proportions(&mut self) {
+        self.invalidate_cache();
         for sample_abundances in self.taxon_abundances.values_mut() {
             for (sample, abundance) in sample_abundances {
                 if let Some(total) = self.sample_totals.get(sample).filter(|total| **total > 0.0) {
@@ -170,35 +175,46 @@ impl AbundanceMatrix {
     }
 
     pub fn sample_names(&self) -> Vec<String> {
-        let mut samples: Vec<_> = self.samples.iter().cloned().collect();
-        samples.sort();
-        samples
+        self.cached_sample_names
+            .get_or_init(|| {
+                let mut samples: Vec<_> = self.samples.iter().cloned().collect();
+                samples.sort();
+                samples
+            })
+            .clone()
     }
 
     pub fn rows(&self) -> Vec<MatrixRow> {
-        let samples = self.sample_names();
-        let mut rows: Vec<_> = self
-            .taxon_abundances
-            .iter()
-            .map(|(taxon, abundances)| MatrixRow {
-                taxid: taxon.taxid,
-                name: taxon.name.clone(),
-                rank: taxon.rank.clone(),
-                values: samples
+        self.cached_rows
+            .get_or_init(|| {
+                let samples = self.sample_names();
+                let mut rows: Vec<_> = self
+                    .taxon_abundances
                     .iter()
-                    .map(|sample| *abundances.get(sample).unwrap_or(&0.0))
-                    .collect(),
+                    .filter_map(|(taxid, abundances)| {
+                        let meta = self.taxon_meta.get(taxid)?;
+                        Some(MatrixRow {
+                            taxid: *taxid,
+                            name: meta.name.clone(),
+                            rank: meta.rank.clone(),
+                            values: samples
+                                .iter()
+                                .map(|sample| *abundances.get(sample).unwrap_or(&0.0))
+                                .collect(),
+                        })
+                    })
+                    .collect();
+                rows.sort_by(|left, right| {
+                    let left_unclassified = left.name == UNCLASSIFIED_NAME;
+                    let right_unclassified = right.name == UNCLASSIFIED_NAME;
+                    right_unclassified
+                        .cmp(&left_unclassified)
+                        .then_with(|| left.name.cmp(&right.name))
+                        .then_with(|| left.taxid.cmp(&right.taxid))
+                });
+                rows
             })
-            .collect();
-        rows.sort_by(|left, right| {
-            let left_unclassified = left.name == UNCLASSIFIED_NAME;
-            let right_unclassified = right.name == UNCLASSIFIED_NAME;
-            right_unclassified
-                .cmp(&left_unclassified)
-                .then_with(|| left.name.cmp(&right.name))
-                .then_with(|| left.taxid.cmp(&right.taxid))
-        });
-        rows
+            .clone()
     }
 
     pub fn write_matrix(&self, output_file: &str) -> AbundanceResult<()> {
@@ -222,6 +238,59 @@ impl AbundanceMatrix {
 
         writer.flush()?;
         Ok(())
+    }
+
+    /// Write a MetaPhlAn-style abundance table using taxonomic names as paths.
+    pub fn write_mpa(&self, output_file: &str) -> AbundanceResult<()> {
+        let file = File::create(output_file)?;
+        let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
+        let samples = self.sample_names();
+
+        write!(writer, "#SampleID")?;
+        for sample in &samples {
+            write!(writer, "\t{sample}")?;
+        }
+        writeln!(writer)?;
+
+        for row in self.rows() {
+            let prefix = mpa_rank_prefix(&row.rank);
+            write!(writer, "{prefix}__{}", row.name.replace(' ', "_"))?;
+            for abundance in row.values {
+                write!(writer, "\t{abundance:.6}")?;
+            }
+            writeln!(writer)?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Write a simple Krona-compatible TSV (count, taxonomy path fragments).
+    pub fn write_krona(&self, output_file: &str) -> AbundanceResult<()> {
+        let file = File::create(output_file)?;
+        let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
+
+        // Krona text input expects magnitude first; use the first sample column.
+        for row in self.rows() {
+            let magnitude = row.values.first().copied().unwrap_or(0.0);
+            writeln!(writer, "{magnitude:.6}\t{}", row.name)?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+}
+
+fn mpa_rank_prefix(rank: &str) -> &'static str {
+    match rank.chars().next().unwrap_or('x') {
+        'D' | 'K' => "k",
+        'P' => "p",
+        'C' => "c",
+        'O' => "o",
+        'F' => "f",
+        'G' => "g",
+        'S' => "s",
+        _ => "x",
     }
 }
 

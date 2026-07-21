@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use chrono::Local;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::abundance_matrix::AbundanceMatrix;
 
@@ -40,6 +40,12 @@ impl From<serde_json::Error> for BiomError {
 
 pub type BiomResult<T> = Result<T, BiomError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BiomMatrixType {
+    Dense,
+    Sparse,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct BiomRow {
     pub taxid: u32,
@@ -48,17 +54,48 @@ pub struct BiomRow {
 }
 
 pub struct BiomTable {
-    pub data: Vec<Vec<f64>>,
+    pub dense_data: Option<Vec<Vec<f64>>>,
+    pub sparse_data: Option<Vec<[Value; 3]>>,
     pub rows: Vec<BiomRow>,
     pub column_ids: Vec<String>,
     pub date: String,
+    pub matrix_type: BiomMatrixType,
 }
 
 impl BiomTable {
-    pub fn from_abundance_matrix(matrix: &AbundanceMatrix) -> Self {
+    pub fn from_abundance_matrix(matrix: &AbundanceMatrix, matrix_type: BiomMatrixType) -> Self {
         let matrix_rows = matrix.rows();
+        let column_ids = matrix.sample_names();
+        let (dense_data, sparse_data) = match matrix_type {
+            BiomMatrixType::Dense => (
+                Some(
+                    matrix_rows
+                        .iter()
+                        .map(|row| row.values.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                None,
+            ),
+            BiomMatrixType::Sparse => {
+                let mut sparse = Vec::new();
+                for (row_idx, row) in matrix_rows.iter().enumerate() {
+                    for (col_idx, value) in row.values.iter().enumerate() {
+                        if *value != 0.0 {
+                            sparse.push([
+                                Value::from(row_idx),
+                                Value::from(col_idx),
+                                Value::from(*value),
+                            ]);
+                        }
+                    }
+                }
+                (None, Some(sparse))
+            }
+        };
+
         Self {
-            data: matrix_rows.iter().map(|row| row.values.clone()).collect(),
+            dense_data,
+            sparse_data,
             rows: matrix_rows
                 .into_iter()
                 .map(|row| BiomRow {
@@ -67,14 +104,24 @@ impl BiomTable {
                     rank: row.rank,
                 })
                 .collect(),
-            column_ids: matrix.sample_names(),
+            column_ids,
             date: Local::now().to_rfc3339(),
+            matrix_type,
         }
     }
 
     pub fn write_json(&self, output_file: &str) -> BiomResult<()> {
         let file = File::create(output_file)?;
         let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
+        let matrix_type = match self.matrix_type {
+            BiomMatrixType::Dense => "dense",
+            BiomMatrixType::Sparse => "sparse",
+        };
+        let data = match self.matrix_type {
+            BiomMatrixType::Dense => json!(self.dense_data.clone().unwrap_or_default()),
+            BiomMatrixType::Sparse => json!(self.sparse_data.clone().unwrap_or_default()),
+        };
+
         let biom_json = json!({
             "id": "krakenclip",
             "format": "Biological Observation Matrix 1.0.0",
@@ -82,10 +129,10 @@ impl BiomTable {
             "type": "OTU table",
             "generated_by": format!("KrakenClip {}", env!("CARGO_PKG_VERSION")),
             "date": self.date,
-            "matrix_type": "dense",
+            "matrix_type": matrix_type,
             "matrix_element_type": "float",
             "shape": [self.rows.len(), self.column_ids.len()],
-            "data": self.data,
+            "data": data,
             "rows": self.rows.iter().map(|row| {
                 json!({
                     "id": row.taxid.to_string(),
@@ -103,7 +150,7 @@ impl BiomTable {
             }).collect::<Vec<_>>()
         });
 
-        serde_json::to_writer_pretty(&mut writer, &biom_json)?;
+        serde_json::to_writer(&mut writer, &biom_json)?;
         writer.flush()?;
         Ok(())
     }
