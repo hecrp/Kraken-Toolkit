@@ -1,204 +1,219 @@
-use std::process::Command;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
-// Test for Kraken2 report parser
-#[test]
-fn test_parse_kraken2_report() {
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("analyze")
-        .arg("data/kraken_report.txt")
+use serde_json::Value;
+use tempfile::tempdir;
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn run(arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_krakenclip"))
+        .args(arguments)
         .output()
-        .expect("Failed to execute analyze command");
-    
+        .expect("KrakenClip should execute")
+}
+
+#[test]
+fn help_lists_commands() {
+    let output = run(&["--help"]);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Memory usage"), "The analysis should show information about memory usage");
-    assert_eq!(output.status.code().unwrap(), 0, "The command should execute successfully");
+    assert!(output.status.success());
+    assert!(stdout.contains("analyze"));
+    assert!(stdout.contains("extract"));
+    assert!(stdout.contains("abundance-matrix"));
 }
 
-// Test that verifies the help command
 #[test]
-fn test_cli_help_output() {
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("--help")
-        .output()
-        .expect("Failed to execute command");
-    
+fn analyze_reports_real_metrics_and_rejects_invalid_taxid() {
+    let report = fixture("report_a.txt");
+    let output = run(&["analyze", report.to_str().unwrap()]);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("KrakenClip"), "The help should contain the program name");
-    assert!(stdout.contains("analyze"), "The help should list the analyze command");
-    assert!(stdout.contains("extract"), "The help should list the extract command");
-    assert!(stdout.contains("abundance-matrix"), "The help should list the abundance-matrix command");
+    assert!(output.status.success());
+    assert!(stdout.contains("File parsing time"));
+    assert!(!stdout.contains("Hierarchy build time"));
+
+    let invalid = run(&["analyze", report.to_str().unwrap(), "--tax-id", "abc"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8(invalid.stderr)
+        .unwrap()
+        .contains("invalid value"));
 }
 
-// Test for the analyze command
 #[test]
-fn test_analyze_command() {
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("analyze")
-        .arg("data/kraken_report.txt")
-        .output()
-        .expect("Failed to execute analyze command");
-    
-    assert_eq!(output.status.code().unwrap(), 0, "The command should execute successfully");
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Hierarchy build time"), "The analysis should show information about hierarchy build time");
+fn analyze_propagates_json_write_failures() {
+    let directory = tempdir().unwrap();
+    let report = fixture("report_a.txt");
+    let output = run(&[
+        "analyze",
+        report.to_str().unwrap(),
+        "--json",
+        directory.path().to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("Error writing JSON report"));
 }
 
-// Test for the extract command
 #[test]
-fn test_extract_command() {
-    // Make sure the output directory exists
-    let output_dir = Path::new("data/outputs/test_extract");
-    if !output_dir.exists() {
-        fs::create_dir_all(output_dir).expect("Could not create output directory");
-    }
-    
-    let output_file = output_dir.join("extracted.fa");
-    // Delete the output file if it exists
-    if output_file.exists() {
-        fs::remove_file(&output_file).expect("Could not delete output file");
-    }
-    
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("extract")
-        .arg("data/sample_reads.fastq")
-        .arg("data/kraken_log.txt")
-        .arg("--output")
-        .arg(output_file.to_str().unwrap())
-        .arg("--taxids")
-        .arg("2")
-        .output()
-        .expect("Failed to execute extract command");
-    
-    assert_eq!(output.status.code().unwrap(), 0, "The command should execute successfully");
-    assert!(output_file.exists(), "The output file should have been created");
-    
-    // Verify that the file is not empty
-    let metadata = fs::metadata(output_file).expect("Could not read output file");
-    assert!(metadata.len() > 0, "The output file should not be empty");
+fn extracts_complete_fastq_records() {
+    let directory = tempdir().unwrap();
+    let output_file = directory.path().join("selected.fastq");
+    let output = run(&[
+        "extract",
+        fixture("reads.fastq").to_str().unwrap(),
+        fixture("kraken.log").to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+        "--taxids",
+        "3",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        fs::read_to_string(output_file).unwrap(),
+        "@read1 description\nACGT\n+\n!!!!\n"
+    );
 }
 
-// Test for the abundance-matrix command
 #[test]
-fn test_abundance_matrix_command() {
-    // Make sure the output directory exists
-    let output_dir = Path::new("data/outputs/test_matrix");
-    if !output_dir.exists() {
-        fs::create_dir_all(output_dir).expect("Could not create output directory");
-    }
-    
-    let output_file = output_dir.join("abundance.tsv");
-    // Delete the output file if it exists
-    if output_file.exists() {
-        fs::remove_file(&output_file).expect("Could not delete output file");
-    }
-    
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("abundance-matrix")
-        .arg("data/kraken_report.txt")
-        .arg("-o")
-        .arg(output_file.to_str().unwrap())
-        .output()
-        .expect("Failed to execute abundance-matrix command");
-    
-    assert_eq!(output.status.code().unwrap(), 0, "The command should execute successfully");
-    assert!(output_file.exists(), "The output file should have been created");
-    
-    // Verify that the file is not empty
-    let metadata = fs::metadata(output_file).expect("Could not read output file");
-    assert!(metadata.len() > 0, "The output file should not be empty");
+fn fasta_exclusion_preserves_following_headers() {
+    let directory = tempdir().unwrap();
+    let output_file = directory.path().join("selected.fasta");
+    let output = run(&[
+        "extract",
+        fixture("reads.fasta").to_str().unwrap(),
+        fixture("kraken.log").to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+        "--taxids",
+        "3",
+        "--exclude",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        fs::read_to_string(output_file).unwrap(),
+        ">read2\nTGCA\n>read3\nAAAA\n"
+    );
 }
 
-// Test for error handling - non-existent file
 #[test]
-fn test_error_nonexistent_file() {
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("analyze")
-        .arg("data/nonexistent_file.txt")
-        .output()
-        .expect("Failed to execute command");
-    
-    assert_ne!(output.status.code().unwrap(), 0, "The command should fail with a non-existent file");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Error"), "It should display an error message");
+fn rejects_truncated_fastq_records() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("truncated.fastq");
+    let output_file = directory.path().join("output.fastq");
+    fs::write(&input, "@read1\nACGT\n+\n").unwrap();
+    let output = run(&[
+        "extract",
+        input.to_str().unwrap(),
+        fixture("kraken.log").to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+        "--taxids",
+        "3",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("truncated FASTQ"));
 }
 
-// Test for error handling - incorrect parameters
 #[test]
-fn test_error_invalid_parameters() {
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("abundance-matrix")
-        .arg("data/kraken_report.txt")
-        .arg("--level")
-        .arg("Z") // Invalid taxonomic level
-        .output()
-        .expect("Failed to execute command");
-    
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("error:"), "It should display an error message");
+fn abundance_threshold_matches_output_units() {
+    let directory = tempdir().unwrap();
+    let proportional = directory.path().join("proportional.tsv");
+    let output = run(&[
+        "abundance-matrix",
+        fixture("report_a.txt").to_str().unwrap(),
+        "--output",
+        proportional.to_str().unwrap(),
+        "--min-abundance",
+        "50",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        fs::read_to_string(proportional).unwrap(),
+        "Taxon\treport_a\n"
+    );
+
+    let absolute = directory.path().join("absolute.tsv");
+    let output = run(&[
+        "abundance-matrix",
+        fixture("report_a.txt").to_str().unwrap(),
+        "--output",
+        absolute.to_str().unwrap(),
+        "--absolute-counts",
+        "--min-abundance",
+        "350",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(fs::read_to_string(absolute)
+        .unwrap()
+        .contains("Species alpha\t400.000000"));
 }
 
-// Test for abundance matrix normalization
 #[test]
-fn test_abundance_matrix_normalization() {
-    // Make sure the output directory exists
-    let output_dir = Path::new("data/outputs/test_matrix");
-    if !output_dir.exists() {
-        fs::create_dir_all(output_dir).expect("Could not create output directory");
-    }
-    
-    let output_file = output_dir.join("abundance_normalized.tsv");
-    // Delete the output file if it exists
-    if output_file.exists() {
-        fs::remove_file(&output_file).expect("Could not delete output file");
-    }
-    
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("abundance-matrix")
-        .arg("data/kraken_report.txt")
-        .arg("-o")
-        .arg(output_file.to_str().unwrap())
-        .arg("--normalize")
-        .output()
-        .expect("Failed to execute abundance-matrix command with normalization");
-    
-    assert_eq!(output.status.code().unwrap(), 0, "The command should execute successfully");
-    assert!(output_file.exists(), "The output file should have been created");
-    
-    // Verify that the file is not empty
-    let metadata = fs::metadata(output_file).expect("Could not read output file");
-    assert!(metadata.len() > 0, "The output file should not be empty");
+fn biom_contains_all_samples_with_row_major_data() {
+    let directory = tempdir().unwrap();
+    let output_file = directory.path().join("matrix.biom");
+    let output = run(&[
+        "abundance-matrix",
+        fixture("report_a.txt").to_str().unwrap(),
+        fixture("report_b.txt").to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+        "--format",
+        "biom",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let biom: Value = serde_json::from_slice(&fs::read(output_file).unwrap()).unwrap();
+    assert_eq!(biom["shape"], serde_json::json!([3, 2]));
+    assert_eq!(biom["columns"].as_array().unwrap().len(), 2);
+    assert!(biom["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.as_array().unwrap().len() == 2));
 }
 
-// Test for extraction with unclassified sequences inclusion
 #[test]
-fn test_abundance_matrix_include_unclassified() {
-    // Make sure the output directory exists
-    let output_dir = Path::new("data/outputs/test_matrix");
-    if !output_dir.exists() {
-        fs::create_dir_all(output_dir).expect("Could not create output directory");
-    }
-    
-    let output_file = output_dir.join("abundance_unclassified.tsv");
-    // Delete the output file if it exists
-    if output_file.exists() {
-        fs::remove_file(&output_file).expect("Could not delete output file");
-    }
-    
-    let output = Command::new("./target/debug/krakenclip")
-        .arg("abundance-matrix")
-        .arg("data/kraken_report.txt")
-        .arg("-o")
-        .arg(output_file.to_str().unwrap())
-        .arg("--include-unclassified")
-        .output()
-        .expect("Failed to execute abundance-matrix command with include-unclassified");
-    
-    assert_eq!(output.status.code().unwrap(), 0, "The command should execute successfully");
-    assert!(output_file.exists(), "The output file should have been created");
-    
-    // Verify that the file is not empty
-    let metadata = fs::metadata(output_file).expect("Could not read output file");
-    assert!(metadata.len() > 0, "The output file should not be empty");
+fn kingdom_alias_selects_kraken_domain_rank() {
+    let directory = tempdir().unwrap();
+    let output_file = directory.path().join("domain.tsv");
+    let output = run(&[
+        "abundance-matrix",
+        fixture("report_a.txt").to_str().unwrap(),
+        "--output",
+        output_file.to_str().unwrap(),
+        "--level",
+        "K",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(fs::read_to_string(output_file)
+        .unwrap()
+        .contains("Bacteria\t90.000000"));
+}
+
+#[test]
+fn generated_report_has_requested_lines_and_valid_hierarchy() {
+    let directory = tempdir().unwrap();
+    let report = directory.path().join("generated.txt");
+    let output = run(&[
+        "generate-test-data",
+        "--output",
+        report.to_str().unwrap(),
+        "--lines",
+        "10",
+        "--type",
+        "dense",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(fs::read_to_string(&report).unwrap().lines().count(), 10);
+
+    let analysis = run(&["analyze", report.to_str().unwrap(), "--tax-id", "1"]);
+    assert!(analysis.status.success(), "{:?}", analysis.stderr);
 }

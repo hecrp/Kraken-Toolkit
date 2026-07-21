@@ -1,17 +1,14 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
 
 metagen_data/
 conda-recipe/
 environment.yml
-*.json
 data/
 NOTES.md
 
 # Benchmark files and results
-benches/
 benchmarks/
 
 # Python
