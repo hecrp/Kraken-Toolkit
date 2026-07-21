@@ -5,7 +5,12 @@ WORKDIR /app
 RUN apk add --no-cache musl-dev libc-dev
 
 COPY Cargo.toml Cargo.lock ./
-RUN cargo fetch --locked
+RUN mkdir -p src benches && \
+    printf 'fn main() {}\n' > src/main.rs && \
+    printf '\n' > src/lib.rs && \
+    printf 'fn main() {}\n' > benches/parsing_benchmark.rs && \
+    cargo fetch --locked && \
+    rm -rf src benches
 
 COPY . .
 
